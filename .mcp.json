@@ -7,6 +7,14 @@
         "/Users/foxai/Desktop/dsh_plugin/foxaippt_claude/index.js"
       ],
       "env": {}
+    },
+    "foxai-vigener": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "/Users/foxai/Desktop/dsh_plugin/foxai_vigener/index.js"
+      ],
+      "env": {}
     }
   }
 }

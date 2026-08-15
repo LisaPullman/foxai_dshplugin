@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>foxai_vigener · FAL AI 生成器</title>
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">⚡</span>
+      <div>
+        <h1>foxai_vigener</h1>
+        <p class="tagline">FAL AI 多模型生成 · 图片 / 视频 / 音频</p>
+      </div>
+    </div>
+    <div id="status" class="status">加载中…</div>
+  </header>
+
+  <main class="layout">
+    <!-- 左:生成面板 -->
+    <section class="panel generate-panel" aria-label="生成面板">
+      <h2>生成内容</h2>
+
+      <div class="field">
+        <label for="model">模型</label>
+        <select id="model"></select>
+        <p class="hint" id="modelHint"></p>
+      </div>
+
+      <div class="field">
+        <label for="prompt">提示词</label>
+        <textarea id="prompt" rows="5" placeholder="描述你想生成的内容…"></textarea>
+      </div>
+
+      <div class="field">
+        <label>参考图 <span class="muted">(可选,多选)</span></label>
+        <div id="refList" class="ref-list"></div>
+        <div class="ref-actions">
+          <input type="file" id="refUpload" accept="image/*" hidden />
+          <button type="button" class="btn-secondary" id="refUploadBtn">＋ 上传参考图</button>
+          <button type="button" class="btn-secondary" id="refClearBtn">清空选择</button>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="field">
+          <label for="aspectRatio">宽高比</label>
+          <select id="aspectRatio">
+            <option value="16:9" selected>16:9 (横屏)</option>
+            <option value="9:16">9:16 (竖屏)</option>
+            <option value="1:1">1:1 (方形)</option>
+            <option value="4:3">4:3</option>
+            <option value="3:4">3:4</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="numImages">张数</label>
+          <input type="number" id="numImages" value="1" min="1" max="8" />
+        </div>
+      </div>
+
+      <div class="field" id="durationField" hidden>
+        <label for="duration">时长(秒)</label>
+        <input type="number" id="duration" value="5" min="3" max="15" />
+      </div>
+
+      <div class="field">
+        <details>
+          <summary>高级参数(透传给 fal)</summary>
+          <textarea id="extraInput" rows="3" placeholder='如 {"mask_url": "https://..."}'></textarea>
+        </details>
+      </div>
+
+      <div class="custom-models-section">
+        <div class="custom-head">
+          <h3>自定义模型</h3>
+          <button id="addCustomBtn" class="btn-secondary">＋ 添加 fal 模型</button>
+        </div>
+        <div id="customList" class="custom-list"></div>
+      </div>
+
+      <button id="generateBtn" class="btn-primary">生成</button>
+
+      <div id="progress" class="progress" hidden>
+        <div class="progress-head">
+          <strong id="progressStatus">排队中…</strong>
+          <span id="progressPosition" class="muted"></span>
+        </div>
+        <pre id="logBox" class="log-box" hidden></pre>
+        <div id="errorBox" class="error-box" hidden></div>
+      </div>
+    </section>
+
+    <!-- 右:完成档画廊 -->
+    <section class="panel gallery-panel" aria-label="完成档">
+      <div class="gallery-head">
+        <h2>完成档</h2>
+        <button id="refreshOutputs" class="btn-secondary">刷新</button>
+      </div>
+      <div id="outputs" class="outputs"></div>
+    </section>
+  </main>
+
+  <!-- 预览弹层 -->
+  <div id="lightbox" class="lightbox" hidden aria-hidden="true">
+    <div class="lightbox-inner">
+      <button class="lightbox-close" id="lightboxClose" aria-label="关闭">✕</button>
+      <div id="lightboxBody"></div>
+    </div>
+  </div>
+
+  <!-- 自定义模型弹层 -->
+  <div id="customModal" class="modal" hidden aria-hidden="true">
+    <div class="modal-inner">
+      <div class="modal-head">
+        <h3 id="customModalTitle">添加自定义模型</h3>
+        <button class="lightbox-close" id="customModalClose" aria-label="关闭">✕</button>
+      </div>
+      <form id="customForm" class="modal-body">
+        <div class="field">
+          <label for="cm-id">fal 端点 ID *</label>
+          <input type="text" id="cm-id" placeholder="如 fal-ai/flux-pro/v1.1" required />
+          <p class="hint">可在 <a href="https://fal.ai/models" target="_blank" rel="noopener">fal.ai/models</a> 查找端点路径</p>
+        </div>
+
+        <div class="grid-2">
+          <div class="field">
+            <label for="cm-label">显示名称 *</label>
+            <input type="text" id="cm-label" placeholder="如 Flux Pro 1.1 · 文生图" required />
+          </div>
+          <div class="field">
+            <label for="cm-type">类型 *</label>
+            <select id="cm-type">
+              <option value="image">🖼 图片</option>
+              <option value="video">🎬 视频</option>
+              <option value="audio">🔊 音频</option>
+              <option value="other">📦 其他</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="field">
+            <label for="cm-kind">用途</label>
+            <select id="cm-kind">
+              <option value="text-to-image">文生图</option>
+              <option value="image-edit">图片编辑</option>
+              <option value="text-to-video">文生视频</option>
+              <option value="image-to-video">图生视频</option>
+              <option value="tts">文本转语音</option>
+              <option value="other">其他</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="cm-prompt">提示词参数</label>
+            <input type="text" id="cm-prompt" value="prompt" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label>参考图支持</label>
+          <div class="inline">
+            <label class="radio"><input type="radio" name="cm-ref" value="none" checked /> 不支持</label>
+            <label class="radio"><input type="radio" name="cm-ref" value="multiple" /> 多张</label>
+            <label class="radio"><input type="radio" name="cm-ref" value="single" /> 单张</label>
+          </div>
+          <input type="text" id="cm-ref-param" placeholder="参考图参数名,如 image_urls / start_image_url" />
+        </div>
+
+        <div class="grid-2">
+          <div class="field">
+            <label for="cm-ar">宽高比参数</label>
+            <input type="text" id="cm-ar" placeholder="如 aspect_ratio" />
+          </div>
+          <div class="field">
+            <label for="cm-num">张数参数</label>
+            <input type="text" id="cm-num" placeholder="如 num_images" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="cm-notes">备注</label>
+          <input type="text" id="cm-notes" placeholder="可选说明" />
+        </div>
+
+        <div class="modal-foot">
+          <button type="button" id="customCancel" class="btn-secondary">取消</button>
+          <button type="submit" id="customSave" class="btn-primary-sm">保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

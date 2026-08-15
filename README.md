@@ -1,6 +1,6 @@
 # foxai_dshplugin
 
-foxai 的 DeepSeek 插件集合仓库,当前包含 [foxaippt](./foxaippt)(AI 网页 PPT 生成器)及其 MCP 版 [foxaippt_claude](./foxaippt_claude)。
+foxai 的 DeepSeek 插件集合仓库,当前包含 [foxaippt](./foxaippt)(AI 网页 PPT 生成器)、其 MCP 版 [foxaippt_claude](./foxaippt_claude),以及 [foxai_vigener](./foxai_vigener)(FAL AI 多模型生成)。
 
 ## 插件一览
 
@@ -8,6 +8,7 @@ foxai 的 DeepSeek 插件集合仓库,当前包含 [foxaippt](./foxaippt)(AI 网
 | --- | --- |
 | [foxaippt](./foxaippt) | 粘贴长文案 → AI(DeepSeek)流式拆解为多页 PPT,网页端全屏演示、多主题切换、导出独立 HTML |
 | [foxaippt_claude](./foxaippt_claude) | foxaippt 的 MCP server:在 Claude Code 中直接调用"文案 → PPT → 独立 HTML",模型复用 Claude Code 当前 API 配置 |
+| [foxai_vigener](./foxai_vigener) | FAL AI 多模型生成插件:图片/视频/音频;自定义模型注册表;**Web 响应式 + MCP 双入口**(供 Claude Code 与 DeepSeek Harness 使用) |
 
 ## foxaippt 快速开始
 

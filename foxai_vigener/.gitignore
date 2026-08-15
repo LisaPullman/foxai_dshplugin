@@ -1,0 +1,8 @@
+node_modules/
+.env
+models.local.json
+完成档/*
+!完成档/.gitkeep
+参考图/*
+!参考图/.gitkeep
+.DS_Store

@@ -1,0 +1,114 @@
+{
+  "$comment": "foxai_vigener 预设模型注册表。自定义模型请写入 models.local.json(同结构,不进 git),同 id 覆盖预设。字段说明见 README。",
+  "models": [
+    {
+      "id": "fal-ai/nano-banana-2",
+      "label": "Nano Banana 2 · 文生图",
+      "type": "image",
+      "kind": "text-to-image",
+      "isDefault": true,
+      "promptParam": "prompt",
+      "referenceImages": null,
+      "aspectRatio": { "param": "aspect_ratio" },
+      "numImages": { "param": "num_images" },
+      "duration": null,
+      "notes": "Google Gemini 3.1 Flash Image,文字渲染与角色一致性强,支持 0.5K~4K"
+    },
+    {
+      "id": "fal-ai/nano-banana-2/edit",
+      "label": "Nano Banana 2 · 图片编辑",
+      "type": "image",
+      "kind": "image-edit",
+      "isDefault": false,
+      "promptParam": "prompt",
+      "referenceImages": { "param": "image_urls", "multiple": true },
+      "aspectRatio": { "param": "aspect_ratio" },
+      "numImages": { "param": "num_images" },
+      "duration": null,
+      "notes": "最多 14 张参考图,语义编辑/合成/风格迁移,无需蒙版"
+    },
+    {
+      "id": "openai/gpt-image-2",
+      "label": "GPT Image 2 · 文生图",
+      "type": "image",
+      "kind": "text-to-image",
+      "isDefault": false,
+      "promptParam": "prompt",
+      "referenceImages": null,
+      "aspectRatio": {
+        "param": "image_size",
+        "map": {
+          "16:9": "landscape_16_9",
+          "9:16": "portrait_16_9",
+          "4:3": "landscape_4_3",
+          "3:4": "portrait_4_3",
+          "1:1": "square"
+        }
+      },
+      "numImages": { "param": "num_images" },
+      "duration": null,
+      "notes": "OpenAI 新一代图像模型,细节与排版精细,最高 4K"
+    },
+    {
+      "id": "openai/gpt-image-2/edit",
+      "label": "GPT Image 2 · 图片编辑",
+      "type": "image",
+      "kind": "image-edit",
+      "isDefault": false,
+      "promptParam": "prompt",
+      "referenceImages": { "param": "image_urls", "multiple": true },
+      "aspectRatio": {
+        "param": "image_size",
+        "map": {
+          "16:9": "landscape_16_9",
+          "9:16": "portrait_16_9",
+          "4:3": "landscape_4_3",
+          "3:4": "portrait_4_3",
+          "1:1": "square"
+        }
+      },
+      "numImages": { "param": "num_images" },
+      "duration": null,
+      "notes": "支持参考图与可选 mask_url(经 extraInput 传入)"
+    },
+    {
+      "id": "fal-ai/kling-video/v3/standard/text-to-video",
+      "label": "可灵 V3 标准版 · 文生视频",
+      "type": "video",
+      "kind": "text-to-video",
+      "isDefault": true,
+      "promptParam": "prompt",
+      "referenceImages": null,
+      "aspectRatio": { "param": "aspect_ratio" },
+      "numImages": null,
+      "duration": { "param": "duration", "default": 5, "min": 3, "max": 15 },
+      "notes": "电影级文生视频,原生音频,时长 3~15 秒,生成耗时分钟级"
+    },
+    {
+      "id": "fal-ai/kling-video/v3/standard/image-to-video",
+      "label": "可灵 V3 标准版 · 图生视频",
+      "type": "video",
+      "kind": "image-to-video",
+      "isDefault": false,
+      "promptParam": "prompt",
+      "referenceImages": { "param": "start_image_url", "multiple": false },
+      "aspectRatio": null,
+      "numImages": null,
+      "duration": { "param": "duration", "default": 5, "min": 3, "max": 15 },
+      "notes": "以参考图为首帧驱动视频;画面比例跟随输入图"
+    },
+    {
+      "id": "fal-ai/gemini-3.1-flash-tts",
+      "label": "Gemini 3.1 Flash · 文本转语音",
+      "type": "audio",
+      "kind": "tts",
+      "isDefault": true,
+      "promptParam": "prompt",
+      "referenceImages": null,
+      "aspectRatio": null,
+      "numImages": null,
+      "duration": null,
+      "notes": "支持表现力标签,如 [laughing] [sigh]"
+    }
+  ]
+}
