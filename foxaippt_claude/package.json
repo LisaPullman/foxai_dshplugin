@@ -1,0 +1,19 @@
+{
+  "name": "foxaippt-claude",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "foxaippt 的 MCP server:长文案 → 当前 Claude Code 所用模型拆解为多页 PPT → 导出独立 HTML 演示文件,供 Claude Code 等 MCP 客户端调用",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node test/client.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

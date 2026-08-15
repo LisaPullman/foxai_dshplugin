@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "foxaippt": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "/Users/foxai/Desktop/dsh_plugin/foxaippt_claude/index.js"
+      ],
+      "env": {}
+    }
+  }
+}

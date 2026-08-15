@@ -1,12 +1,13 @@
 # foxai_dshplugin
 
-foxai 的 DeepSeek 插件集合仓库,当前包含 [foxaippt](./foxaippt) —— 一个 AI 网页 PPT 生成器。
+foxai 的 DeepSeek 插件集合仓库,当前包含 [foxaippt](./foxaippt)(AI 网页 PPT 生成器)及其 MCP 版 [foxaippt_claude](./foxaippt_claude)。
 
 ## 插件一览
 
 | 插件 | 说明 |
 | --- | --- |
 | [foxaippt](./foxaippt) | 粘贴长文案 → AI(DeepSeek)流式拆解为多页 PPT,网页端全屏演示、多主题切换、导出独立 HTML |
+| [foxaippt_claude](./foxaippt_claude) | foxaippt 的 MCP server:在 Claude Code 中直接调用"文案 → PPT → 独立 HTML",模型复用 Claude Code 当前 API 配置 |
 
 ## foxaippt 快速开始
 
