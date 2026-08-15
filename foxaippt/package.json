@@ -1,0 +1,17 @@
+{
+  "name": "foxaippt",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "foxaippt — AI 网页 PPT 生成器:粘贴长文案,AI 拆解为多页 PPT,流式生成,可全屏演示、换主题、导出独立 HTML",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

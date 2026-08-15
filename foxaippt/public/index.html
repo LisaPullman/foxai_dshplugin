@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>foxaippt · AI 网页 PPT 生成器</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="app__header">
+      <h1><span class="logo__sig"></span><span class="logo">foxaippt</span> · AI 网页 PPT 生成器</h1>
+      <span class="tag">DeepSeek · 流式生成</span>
+      <span class="spacer"></span>
+      <span class="tag" id="model-badge">模型加载中…</span>
+    </header>
+
+    <main class="workspace">
+      <!-- 输入区 -->
+      <section class="editor-pane">
+        <div class="pane__label"><span class="dot"></span>Input · 文案输入</div>
+        <textarea id="input-text" placeholder="在此粘贴长文案,然后点击「生成 PPT」……"></textarea>
+        <div class="editor-toolbar">
+          <button class="btn btn--primary" id="btn-generate">⚡ 生成 PPT</button>
+          <button class="btn btn--ghost" id="btn-stop" disabled>停止</button>
+          <button class="btn btn--ghost" id="btn-clear">清空</button>
+          <span class="char-count" id="char-count">0 字</span>
+        </div>
+      </section>
+
+      <!-- 演示区 -->
+      <section class="stage-pane">
+        <div class="stage-empty" id="stage-empty">
+          <h2>粘贴文案,开始生成你的演示文稿</h2>
+          <p>生成后 <kbd>←</kbd><kbd>→</kbd> 翻页 · <kbd>F</kbd> / <kbd>Space</kbd> 全屏 · 主题切换 · 导出独立 HTML</p>
+        </div>
+
+        <div class="progress-wrap" id="progress-wrap" hidden>
+          <div class="label">
+            <span id="progress-label">正在生成…</span>
+            <span id="progress-count"></span>
+          </div>
+          <div class="progress-bar"><div id="progress-fill"></div></div>
+        </div>
+
+        <div class="deck" id="deck" data-theme="midnight" hidden>
+          <div class="deck__pager" id="pager"></div>
+        </div>
+
+        <div class="stage-controls" id="stage-controls" hidden>
+          <button class="btn btn--ghost" id="btn-prev">← 上一页</button>
+          <span class="hint" id="page-hint">1 / 1</span>
+          <button class="btn btn--ghost" id="btn-next">下一页 →</button>
+          <button class="btn btn--ghost" id="btn-fullscreen">⛶ 全屏</button>
+          <div class="theme-select">
+            <select id="theme-select" aria-label="主题切换">
+              <option value="midnight">深空蓝</option>
+              <option value="ocean">赛博青</option>
+              <option value="sunset">熔岩橙</option>
+              <option value="forest">极光绿</option>
+              <option value="paper">月岩白</option>
+            </select>
+          </div>
+          <button class="btn btn--ghost" id="btn-export">⬇ 导出 HTML</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="./app.js"></script>
+</body>
+</html>
