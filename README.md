@@ -9,6 +9,7 @@ foxai 的 DeepSeek 插件集合仓库,当前包含 [foxaippt](./foxaippt)(AI 网
 | [foxaippt](./foxaippt) | 粘贴长文案 → AI(DeepSeek)流式拆解为多页 PPT,网页端全屏演示、多主题切换、导出独立 HTML |
 | [foxaippt_claude](./foxaippt_claude) | foxaippt 的 MCP server:在 Claude Code 中直接调用"文案 → PPT → 独立 HTML",模型复用 Claude Code 当前 API 配置 |
 | [foxai_vigener](./foxai_vigener) | FAL AI 多模型生成插件:图片/视频/音频;自定义模型注册表;**Web 响应式 + MCP 双入口**(供 Claude Code 与 DeepSeek Harness 使用) |
+| [foxai_img2threejs](./foxai_img2threejs) | img2threejs 的 DSH 宿主插件(npm 持久 Plugin):把参考图 → 程序化 Three.js 模型的 Agent Skill 注册进 `ctx.skills`,`dsh plugin add` 一次安装、全會话可用;见 [README-DSH.md](./foxai_img2threejs/README-DSH.md) |
 
 ## foxaippt 快速开始
 
