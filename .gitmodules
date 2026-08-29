@@ -1,0 +1,3 @@
+[submodule "foxai-gpt-image-2"]
+	path = foxai-gpt-image-2
+	url = https://github.com/LisaPullman/awesome-gpt-image-2.git
