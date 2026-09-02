@@ -4,7 +4,7 @@
       "type": "stdio",
       "command": "node",
       "args": [
-        "/Users/foxai/Desktop/dsh_plugin/foxaippt_claude/index.js"
+        "/Users/foxai/Desktop/dshplugin/foxaippt_claude/index.js"
       ],
       "env": {}
     },
@@ -12,7 +12,7 @@
       "type": "stdio",
       "command": "node",
       "args": [
-        "/Users/foxai/Desktop/dsh_plugin/foxai_vigener/index.js"
+        "/Users/foxai/Desktop/dshplugin/foxai_vigener/index.js"
       ],
       "env": {}
     },
@@ -20,7 +20,7 @@
       "type": "stdio",
       "command": "node",
       "args": [
-        "/Users/foxai/Desktop/dsh_plugin/foxai-gpt-image-2/claude/mcp-server.mjs"
+        "/Users/foxai/Desktop/dshplugin/foxai-gpt-image-2/claude/mcp-server.mjs"
       ],
       "env": {}
     }
