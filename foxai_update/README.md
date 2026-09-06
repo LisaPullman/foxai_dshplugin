@@ -10,14 +10,20 @@
 | `opencode` | OpenCode | `opencode-ai` | `opencode` |
 | `pi` | Pi | `@earendil-works/pi-coding-agent` | `pi` |
 
+升级后还会自动做两类自愈：
+
+1. **CC Switch 环境变量恢复** — claude 升级后从 `~/.cc-switch/cc-switch.db` 读当前激活 provider 的 env 段，写回 `~/.claude/settings.json`（含 `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` 等），避免 Claude 升级后环境变量丢失导致启动失败
+2. **Pi extensions 检查/升级** — 自动扫描 `~/.pi/agent/npm/` 下的 user packages（pi-mcp-adapter / pi-subagents / pi-web-access / pi-wechat-assistant 等），升级时调 `pi update --all` 一并处理 pi 自身 + 所有 extensions
+
 **跨平台**：macOS / Linux / Windows 全支持（核心逻辑为纯 Node.js，无 bash 依赖）。
 
 ## 架构
 
 ```
-scripts/update-cli-tools.js   ★ 核心逻辑（唯一实现，纯 Node，跨平台）
+scripts/update-cli-tools.js   ★ 核心逻辑（升级 5 款 CLI）
+scripts/cc-switch-restore.js ★ CC Switch 环境变量恢复（升级后自愈）
         ↑                ↑
-FoxAI一键检查更新.command   DSH 动态 Cordis 插件（plugin/host.js 内嵌该脚本）
+FoxAI一键检查更新.command   DSH 动态 Cordis 插件（plugin/host.js 内嵌这两个脚本）
 foxai-update-linux.sh         ├─ 工具 foxai_cli_update（agent 可调用）
 FoxAI一键检查更新.bat         └─ Web 结果卡片（plugin/client.js）
 ```
@@ -66,7 +72,30 @@ node scripts/update-cli-tools.js --json           # 末尾追加 ##JSON## 行（
 | `check_only` | boolean | `true` 仅检查报告，不改动（默认 `false` 执行更新） |
 | `tools` | string[] | 只处理这些 id（默认全部 5 个） |
 
-返回 `{ success, results: [{id, name, status, installed, latest, action, error}], summary, output_tail }`。
+返回结构：
+
+```js
+{
+  success: true,
+  check_only: false,
+  results: [{ id, name, status, installed, latest, action, error }],  // 5 个 CLI
+  summary: { ok: 4, upgraded: 1 },
+  output_tail: "...",      // 最后 1500 字符人类可读输出
+  env_restore: {           // CC Switch 环境变量恢复
+    skipped: false,
+    by_app: { claude: { status: 'restored', provider: '智谱', envKeys: 13 } }
+  },
+  pi_extensions: {         // Pi extensions 检查/升级
+    skipped: false,
+    upgrade: {
+      ok: true,
+      elapsed_ms: 6008,
+      results: [{ name: 'pi-mcp-adapter', status: 'ok', ... }]
+    }
+  }
+}
+```
+
 Web 端同时出现结果卡片：状态表 + 「检查更新」/「立即更新」按钮 + 执行输出折叠区。
 
 ## 状态说明
@@ -80,20 +109,66 @@ Web 端同时出现结果卡片：状态表 + 「检查更新」/「立即更新
 | `unknown` | 无法查询 npm registry（多为网络问题），跳过 |
 | `error` | 安装/升级失败（附错误详情） |
 
+## 自愈 1：CC Switch 环境变量恢复
+
+`scripts/cc-switch-restore.js` — 升级完 CLI 后从 [CC Switch](https://github.com/farion1231/cc-switch) 数据库读当前激活 provider 的 env 段，覆盖写回对应配置文件。
+
+**用户场景**：通过 CC Switch 配智谱 GLM 路由（`ANTHROPIC_BASE_URL=https://open.bigmodel.cn/api/anthropic`、`ANTHROPIC_MODEL=glm-5.3[1M]` 等）的 env 写入 `~/.claude/settings.json`。Claude Code 升级有时会清空该文件，导致「Claude 不能启动」。本插件在升级后自动从 CC Switch 恢复这些 env，无需手动进 GUI 点「应用」。
+
+| 工具 | 目标文件 | 备注 |
+| --- | --- | --- |
+| `claude` | `~/.claude/settings.json` | 合并 `env` 段，保留 `tui` / `permissions` 等其他顶层 key |
+| `codex` | `~/.codex/auth.json` | codex 用 `auth.json` 而非 `config.toml` 存 API key |
+| `opencode` / `gemini` / `pi` | 对应配置文件 | 当前用户未在 CC Switch 配置 is_current=1 provider，自动 `skipped` |
+
+**跨平台**：
+- macOS / Linux — 用系统 `sqlite3` CLI 读 DB（无需 npm 依赖）
+- Windows — 大多无自带 sqlite3 CLI，优雅跳过（返回 `status: 'no-sqlite3'`），不报错
+- 写入前自动备份原文件为 `<file>.foxup-backup-<ISO>`，可手动回滚
+
+**降级行为**：
+- CC Switch 未装（`~/.cc-switch/cc-switch.db` 不存在）→ `status: 'no-db'`，跳过
+- is_current=1 provider 无 env 段（OpenAI Official 走 OAuth）→ `status: 'skipped'`，不算失败
+- 配置文件损坏 → 备份为 `.foxup-corrupt-<ISO>` 后重建
+
+**新增 CLI flag**：`--no-restore` 跳过恢复步骤（高级用户手动管理 env 时）。
+
+## 自愈 2：Pi extensions 检查/升级
+
+pi 在 `~/.pi/agent/npm/node_modules/` 下管理 user extensions，本插件在主流程结束后自动处理：
+
+- **check 模式**：扫描 `~/.pi/agent/npm/package.json` 的 `dependencies`，对每个 extension 比对 `installed` vs `latest`
+- **upgrade 模式**：调 `pi update --all`，由 pi 自己管理 `~/.pi/settings.json` 元数据；解析 stdout 中 `Updating npm:<pkg>...` 行 + 前后版本对比，把每个 extension 标记为 `upgraded` / `ok`
+
+示例输出：
+
+```
+  … Pi extensions:
+    extension               状态           当前版本       最新版本       操作
+    pi-mcp-adapter          ✓ ok         2.32.1     2.32.1     已是最新
+    pi-subagents            ✓ ok         0.65.1     0.65.1     已是最新
+    pi-web-access           ✓ ok         0.28.0     0.28.0     已是最新
+    pi-wechat-assistant     ↑ upgraded   0.3.1      0.3.1      已升级 0.1.0 → 0.3.1
+```
+
+降级后实测：先把 `pi-wechat-assistant` 用 `npm install pi-wechat-assistant@0.1.0 --prefix ~/.pi/agent/npm` 降到 0.1.0，跑本插件一次，自动恢复到 0.3.1。
+
 ## 平台兼容性
 
 | 事项 | macOS | Linux | Windows |
 | --- | --- | --- | --- |
 | 核心（Node.js） | ✅ | ✅ | ✅（npm 经 `shell` 解析，兼容 `npm.cmd`） |
 | 双击入口 | `.command` | `.sh` | `.bat` |
-| DSH 插件 | ✅ `ctx.subprocess` + `node -e` 内嵌脚本（~7.5KB，远低于 32K 参数上限） | ✅ | ✅ |
+| DSH 插件 | ✅ `ctx.subprocess` + `node -e` 内嵌脚本（host bundle 约 22KB，远低于 32K 参数上限） | ✅ | ✅ |
 | 全局权限 | 默认前缀可写 | 若 EACCES，自动给出 `sudo` 或用户级 prefix（`npm config set prefix ~/.npm-global`）两种方案 | 默认前缀 `%APPDATA%\npm` 可写 |
 
 ## 常见问题
 
+- **Claude Code 升级后「不能启动」**：通过 CC Switch 配智谱 GLM 路由的用户常遇到——Claude 升级覆盖 `~/.claude/settings.json`，把 env 段清空。本插件默认在升级后自动从 CC Switch DB 恢复（见上文「自愈 1」）。如果用的是 OpenAI 官方认证则不会被覆盖。
 - **插件激活后工具没出现 / 调用报 subprocess 不可用**：宿主需挂载 `@deepseek-ai/dsh-subprocess-local`（`dsh-base` 标准组成）。工具会降级返回等价的手动命令，不会静默失败。
 - **识别为 external**：说明该 CLI 是 brew/官方安装器装的。想交给本插件管理，先卸载原渠道版本（如 `brew uninstall gemini-cli`）再运行。
 - **升级期间正在使用某 CLI**：npm 替换的是磁盘文件，已运行的进程不受影响，下次启动生效。
+- **Pi extensions 在哪管理**：用 `pi install <npm pkg>` / `pi list` / `pi remove` 命令；本插件不安装新 extension（只升级已装的）。新装仍需走 `pi install`。
 
 ## 开发
 
