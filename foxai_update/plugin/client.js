@@ -5,7 +5,28 @@
 // host.call("foxai_cli_update", {...}) 调用 Host 工具。
 // 注意：动态客户端代码不经 JSX 编译，一律使用 React.createElement。
 
-const TOOL_IDS = ['claude', 'codex', 'gemini', 'opencode', 'pi'];
+const TOOL_IDS = ['claude', 'codex', 'gemini', 'opencode', 'pi', 'dsh'];
+
+const DSH_WEB_LABEL = {
+  launched: '已启动',
+  restarted: '已 kill 旧进程并重启',
+  'detected-running': '已在运行，未做改动',
+  'detected-not-running': '未运行（本次未要求启动）',
+  'kill-error': 'kill 失败，未重启',
+  'port-still-busy': '端口仍被占用，未重启',
+  'skipped-self-in-dsh-gui': '检测到从 DSH GUI 内调用，已跳过重启',
+  'restart-no-pid': '端口有响应但找不到进程 pid，已跳过',
+};
+
+function dshWebLine(w) {
+  if (!w || w.skipped) return '';
+  let s = 'DSH web (' + (w.url || 'http://127.0.0.1:3080') + '): ';
+  s += DSH_WEB_LABEL[w.action] || w.action || '';
+  if (w.owner_pid) s += ' · 旧 pid ' + w.owner_pid;
+  if (w.pid) s += ' · 新 pid ' + w.pid;
+  if (w.bound === false) s += ' · 端口未确认 bind';
+  return s;
+}
 
 const STATUS_META = {
   ok: { icon: '✓', label: '已最新', cls: 'foxup-ok' },
@@ -85,6 +106,9 @@ function UpdateView(props) {
         )
       : null,
     renderTable(),
+    data && data.dsh_web && !data.dsh_web.skipped
+      ? React.createElement('div', { className: 'foxup-meta' }, dshWebLine(data.dsh_web))
+      : null,
     data && data.output_tail
       ? React.createElement('details', { className: 'foxup-details' },
           React.createElement('summary', null, '执行输出'),

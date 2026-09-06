@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // =============================================================
 // foxai_update — AI CLI 编码工具 检查/安装/升级（跨平台：macOS / Linux / Windows）
-// 管辖工具: claude code / codex cli / gemini cli / opencode / pi
+// 管辖工具: claude code / codex cli / gemini cli / opencode / pi / dsh(deepseek harness)
 //
 // 用法:
 //   node update-cli-tools.js                    检查并自动安装/升级到最新
@@ -9,6 +9,8 @@
 //   node update-cli-tools.js --json             末尾追加 ##JSON## 行（供插件解析）
 //   node update-cli-tools.js --only pi,claude   只处理指定子集
 //   node update-cli-tools.js --no-restore       跳过 CC Switch 环境变量恢复
+//   node update-cli-tools.js --launch-dsh-web   升级后确保 DSH web 在跑(没跑则启动)
+//   node update-cli-tools.js --restart-dsh-web  DSH web 在跑则 kill 后重启(没跑则启动)
 //
 // 状态说明:
 //   ok          已是最新
@@ -18,6 +20,11 @@
 //   external    二进制存在但非 npm 全局渠道（如 brew/scoop），跳过
 //   unknown     无法查询 npm registry（多为网络问题）
 //   error       安装/升级失败
+//
+// DSH web（`npx @deepseek-ai/dsh web`，默认 http://127.0.0.1:3080，可用环境
+// 变量 DSH_WEB_URL 覆盖）在工具升级后接管其生命周期：--launch-dsh-web 未运
+// 行才启动；--restart-dsh-web 已运行则先 kill 再重启；从 DSH GUI 内派生的会
+// 话会自动跳过 kill 以免自杀；--check 模式只探活报告，不做任何改动。
 //
 // 升级后（仅对 upgraded/installed 项）会自动调用 cc-switch-restore ，
 // 从 ~/.cc-switch/cc-switch.db 把当前激活 provider 的 env 段写回
@@ -53,6 +60,7 @@ const TOOLS = [
   { id: 'gemini',   name: 'Gemini CLI',  pkg: '@google/gemini-cli',             bin: 'gemini' },
   { id: 'opencode', name: 'OpenCode',    pkg: 'opencode-ai',                    bin: 'opencode' },
   { id: 'pi',       name: 'Pi',          pkg: '@earendil-works/pi-coding-agent', bin: 'pi' },
+  { id: 'dsh',      name: 'DeepSeek Harness', pkg: '@deepseek-ai/dsh',           bin: 'dsh' },
 ];
 
 // ---------- 参数解析（兼容 node file.js 与 node -e SCRIPT -- … 两种运行方式） ----------
@@ -77,6 +85,15 @@ const OPTS = parseArgs(process.argv);
 const CHECK_ONLY = OPTS.check;
 const EMIT_JSON = OPTS.json;
 const NO_RESTORE = process.argv.indexOf('--no-restore') !== -1;
+const LAUNCH_DSH_WEB = process.argv.indexOf('--launch-dsh-web') !== -1;
+const RESTART_DSH_WEB = process.argv.indexOf('--restart-dsh-web') !== -1;
+const DSH_WEB_URL = process.env.DSH_WEB_URL || 'http://127.0.0.1:3080';
+const DSH_WEB_HOST = (function () {
+  try {
+    const u = new URL(DSH_WEB_URL);
+    return { host: u.hostname, port: Number(u.port || (u.protocol === 'https:' ? 443 : 80)) };
+  } catch (e) { return { host: '127.0.0.1', port: 3080 }; }
+})();
 // 仅当 only 是字符串(可能为空)时建立 onlySet,null 表示未传 --only
 const onlySet = OPTS.only === null ? null : OPTS.only.split(',').map(function (s) { return s.trim() });
 
@@ -151,6 +168,269 @@ function piBin(args, timeoutMs) {
 function homeDir() {
   return process.env.HOME || process.env.USERPROFILE || (process.env.HOMEDRIVE && process.env.HOMEPATH ? process.env.HOMEDRIVE + process.env.HOMEPATH : require('os').homedir());
 }
+
+// ---------- DSH web 探活 / 启动 / 重启 ----------
+// dsh web（DeepSeek Harness 浏览器 UI，`npx @deepseek-ai/dsh web`）默认监听
+// 127.0.0.1:3080。这一段全部同步实现：
+//   - TCP 探活跑在独立子进程 scripts/lib/tcp-probe.js 里（独立事件循环，
+//     socket 回调能正常触发），本进程 spawnSync 等它的 JSON 输出。
+//     在本进程里直接 net.createConnection + 忙等是行不通的——同步等待同样
+//     阻塞本进程事件循环，connect 回调永远不触发。
+//   - sleep 用 Atomics.wait（Node 主线程可用；跨平台、不烧 CPU、不依赖
+//     /bin/sleep——Windows 上没有它）。
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function probeTcpSync(host, port, timeoutMs) {
+  // 经 build.js 内嵌进 host bundle 后以 `node -e` 运行：没有 __dirname、
+  // 也找不到 lib/tcp-probe.js —— 退化为「端口占用者」判断（lsof/netstat）
+  let probe = null;
+  try { probe = path.join(__dirname, 'lib', 'tcp-probe.js'); } catch (_) {}
+  if (!probe || !fs.existsSync(probe)) return lookupOwnerPid(port) !== null;
+  const tm = timeoutMs || 1500;
+  const r = spawnSync(process.execPath, [probe, String(host), String(port), String(tm)], {
+    encoding: 'utf8',
+    timeout: tm + 2000,
+    maxBuffer: 64 * 1024,
+  });
+  if (r.error || r.status !== 0) return false;
+  const out = String(r.stdout || '').trim();
+  try {
+    const obj = JSON.parse(out);
+    return !!(obj && obj.result);
+  } catch (e) {
+    return false;
+  }
+}
+
+function lookupOwnerPid(port) {
+  // 找到占用该端口的进程 PID;macOS/Linux 用 lsof,Windows 用 netstat。
+  // timeout 放宽到 8s:系统繁忙时（如刚跑完 npm install）lsof 可能超过 5s。
+  let ownerPid = null;
+  if (!IS_WIN) {
+    const r = spawnSync('lsof', ['-nP', '-iTCP:' + port + '-sTCP:LISTEN', '-t'], {
+      encoding: 'utf8', shell: false, timeout: 8000,
+    });
+    if (!r.error && r.status === 0) {
+      const pid = String(r.stdout || '').trim().split('\n')[0];
+      if (/^\d+$/.test(pid)) ownerPid = parseInt(pid, 10);
+    }
+  } else {
+    const r = spawnSync('netstat', ['-ano', '-p', 'TCP'], { encoding: 'utf8', shell: true, timeout: 8000 });
+    if (!r.error && r.status === 0) {
+      const lines = String(r.stdout || '').split(/\r?\n/);
+      const portStr = ':' + port;
+      for (const line of lines) {
+        if (line.includes(portStr) && line.includes('LISTENING')) {
+          const m = line.trim().match(/\s(\d+)\s*$/);
+          if (m) { ownerPid = parseInt(m[1], 10); break; }
+        }
+      }
+    }
+  }
+  return ownerPid;
+}
+
+function isProcessAlive(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch (e) { return false; }
+}
+
+// SIGTERM -> 等 graceMs -> SIGKILL;返回最终状态
+function killProcess(pid, graceMs) {
+  if (!pid || !/^\d+$/.test(String(pid))) {
+    return { ok: false, error: 'invalid pid: ' + pid };
+  }
+  const p = parseInt(pid, 10);
+  if (p === process.pid || p === process.ppid) {
+    return { ok: false, error: 'refusing to kill self/parent (pid ' + p + ')' };
+  }
+  const grace = graceMs || 5000;
+
+  try { process.kill(p, 'SIGTERM'); }
+  catch (e) { return { ok: false, error: 'SIGTERM 失败: ' + String((e && e.message) || e) }; }
+
+  const start = Date.now();
+  while (Date.now() - start < grace) {
+    if (!isProcessAlive(p)) return { ok: true, signal: 'SIGTERM' };
+    sleepSync(100);
+  }
+
+  try { process.kill(p, 'SIGKILL'); }
+  catch (e) {
+    if (!e || e.code !== 'ESRCH') {
+      return { ok: false, error: 'SIGKILL 失败: ' + String((e && e.message) || e) };
+    }
+  }
+  const t2 = Date.now();
+  while (Date.now() - t2 < 1000) {
+    if (!isProcessAlive(p)) return { ok: true, signal: 'SIGKILL' };
+    sleepSync(100);
+  }
+  return { ok: false, error: 'SIGKILL 后进程仍存活' };
+}
+
+function launchDshWeb() {
+  // detached + unref:子进程在父进程退出后继续运行;父进程不等它退出。
+  const args = ['-y', '@deepseek-ai/dsh', 'web', '--no-open'];
+  if (DSH_WEB_HOST.port !== 3080) args.push('--port', String(DSH_WEB_HOST.port));
+  if (DSH_WEB_HOST.host !== '127.0.0.1') args.push('--host', DSH_WEB_HOST.host);
+  try {
+    const child = require('child_process').spawn('npx', args, {
+      detached: true, stdio: 'ignore', shell: IS_WIN, cwd: homeDir(), windowsHide: true,
+    });
+    child.unref();
+    return { ok: true, pid: child.pid, argv: ['npx'].concat(args) };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e), argv: ['npx'].concat(args) };
+  }
+}
+
+// 检测本进程是否从 DSH GUI 内 spawn (启发式: ppid 链上含 dsh/web/deepseek-harness)
+function detectInDshGui() {
+  if (IS_WIN) return detectInDshGuiWin();
+  let pid = process.ppid;
+  let hops = 0;
+  while (pid && pid !== 1 && hops < 6) {
+    try {
+      const r = spawnSync('ps', ['-p', String(pid), '-o', 'comm='], {
+        encoding: 'utf8', shell: false, timeout: 2000,
+      });
+      if (r.error || r.status !== 0) break;
+      const comm = String(r.stdout || '').trim();
+      if (/dsh|deepseek-harness|node.*dsh/i.test(comm)) return true;
+    } catch (_) { break; }
+    try {
+      const r2 = spawnSync('ps', ['-p', String(pid), '-o', 'ppid='], {
+        encoding: 'utf8', shell: false, timeout: 2000,
+      });
+      if (r2.error || r2.status !== 0) break;
+      const ppid = parseInt(String(r2.stdout || '').trim(), 10);
+      if (!ppid || ppid === pid) break;
+      pid = ppid;
+    } catch (_) { break; }
+    hops++;
+  }
+  return false;
+}
+
+// Windows 无 ps：用 PowerShell 沿 ParentProcessId 链取 CommandLine（一次调用）
+function detectInDshGuiWin() {
+  const script = '$p=' + process.ppid + '; while($p -and $p -ne 0 -and $p -ne 4){' +
+    '$c=Get-CimInstance Win32_Process -Filter "ProcessId=$p" -ErrorAction SilentlyContinue;' +
+    'if(-not $c){break}; $c.CommandLine; $p=$c.ParentProcessId }';
+  try {
+    const r = spawnSync('powershell', ['-NoProfile', '-Command', script], {
+      encoding: 'utf8', timeout: 15000,
+    });
+    if (r.error || r.status !== 0) return false;
+    return /dsh|deepseek[-_]harness|deepseek-ai/i.test(String(r.stdout || ''));
+  } catch (_) { return false; }
+}
+
+// lsof 慢/失败时的兜底：ps 扫描命令行里的 dsh web 进程
+// （`node …/bin/dsh web` 本体与 `npm exec @deepseek-ai/dsh web` / `npx …` 包装器）。
+// 只认以上两种形状，dsh-doctor supervisor、编辑器打开的同名文件等不会误伤。
+function scanPsForDshWeb() {
+  if (IS_WIN) return []; // Windows 无 ps；端口归属走 netstat 路径
+  const r = spawnSync('ps', ['-axo', 'pid=,ppid=,command='], { encoding: 'utf8', timeout: 8000 });
+  if (r.error || r.status !== 0) return [];
+  const mine = new Set([process.pid, process.ppid]);
+  const out = [];
+  for (const line of String(r.stdout || '').split('\n')) {
+    const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
+    if (!m) continue;
+    const pid = parseInt(m[1], 10), ppid = parseInt(m[2], 10), cmd = m[3];
+    if (mine.has(pid)) continue;
+    const isListener = /(^|\/)dsh\s+web(\s|$)/.test(cmd);
+    const isWrapper = /^(npm|npx)\s+(exec\s+)?@?deepseek-ai\/dsh\s+web/.test(cmd);
+    if (!isListener && !isWrapper) continue;
+    out.push({ pid: pid, ppid: ppid, cmd: cmd, wrapper: !isListener });
+  }
+  return out;
+}
+
+// 定位要 kill 的 dsh web 进程：优先端口占用者（最准，能识别自定义端口）；
+// 拿不到（lsof 超时等）再退回 ps 命令行扫描。都失败返回 {pid: null}。
+function findDshWebPid(port) {
+  for (let i = 0; i < 2; i++) {
+    const pid = lookupOwnerPid(port);
+    if (pid) return { pid: pid, how: 'port-owner' };
+  }
+  const cands = scanPsForDshWeb();
+  const pick = cands.filter(function (c) { return !c.wrapper; })[0] || cands[0];
+  if (pick) return { pid: pick.pid, how: 'ps-scan', cmd: pick.cmd };
+  return { pid: null, how: 'none' };
+}
+
+// kill 监听进程后，向上清理 dsh 相关的包装进程（如 `npm exec @deepseek-ai/dsh web`）；
+// 一旦遇到非 dsh 进程（用户 shell 等）立即停手，绝不误杀终端。
+function killDshAncestors(childPid) {
+  if (IS_WIN) return []; // 包装进程会随子进程退出，Windows 上不额外追溯
+  const killed = [];
+  let cur = childPid;
+  for (let hops = 0; hops < 4; hops++) {
+    const r = spawnSync('ps', ['-p', String(cur), '-o', 'ppid='], { encoding: 'utf8', timeout: 2000 });
+    if (r.error || r.status !== 0) break;
+    const pp = parseInt(String(r.stdout || '').trim(), 10);
+    if (!pp || pp === 1 || pp === process.pid) break;
+    const rc = spawnSync('ps', ['-p', String(pp), '-o', 'command='], { encoding: 'utf8', timeout: 2000 });
+    if (rc.error || rc.status !== 0) break;
+    const cmd = String(rc.stdout || '').trim();
+    if (!cmd || !/dsh|deepseek[-_]harness|deepseek-ai/i.test(cmd)) break;
+    const k = killProcess(pp, 3000);
+    if (k.ok) killed.push(pp);
+    cur = pp;
+  }
+  return killed;
+}
+
+// 等端口彻底空闲（占用者死亡 + TCP 无响应）；deadline 后再复核一次
+function waitForPortFree(host, port, timeoutMs) {
+  const free = function () { return lookupOwnerPid(port) === null && !probeTcpSync(host, port, 400); };
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (free()) return true;
+    sleepSync(250);
+  }
+  return free();
+}
+
+// 启动后轮询端口直到 bind；npx 首次下载依赖可能较慢，给足 60s
+function waitForBind(host, port, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    sleepSync(1000);
+    if (probeTcpSync(host, port, 500)) return true;
+  }
+  return false;
+}
+
+function launchDshWebAndWait() {
+  const r = launchDshWeb();
+  if (!r.ok) {
+    out('    ✗ 启动失败: ' + (r.error || 'unknown'));
+    return Object.assign({ bound: false }, r);
+  }
+  out('    · 已 spawn (pid ' + r.pid + ')，等待端口 bind（最多 60s，npx 首次下载依赖可能较慢）…');
+  const bound = waitForBind(DSH_WEB_HOST.host, DSH_WEB_HOST.port, 60000);
+  if (!bound) {
+    out('    ! 60s 内端口未 bind；npx 可能仍在下载依赖，稍后手动访问 ' + DSH_WEB_URL + ' 确认');
+    return Object.assign({ bound: false }, r);
+  }
+  out('    ✓ 已就绪: ' + DSH_WEB_URL);
+  // dsh web 先 bind 端口、后加载 profile 插件；插件与新版本 dsh 不兼容时会在
+  // 启动后数秒内退出。就绪后复核一次，避免「报告已就绪、实际已崩溃」的假阳性。
+  sleepSync(3000);
+  if (!probeTcpSync(DSH_WEB_HOST.host, DSH_WEB_HOST.port, 500)) {
+    out('    ! 进程在就绪后数秒内退出——通常是 ~/.dsh/profiles/web 下的插件与新版本 dsh 不兼容');
+    out('      可在该 profile 目录执行 npm update 升级插件后重试，或暂时回退旧版: npm i -g @deepseek-ai/dsh@<旧版本号>');
+    return Object.assign({ bound: true, stable: false }, r);
+  }
+  return Object.assign({ bound: true, stable: true }, r);
+}
+
 
 function piExtensionsInstalled() {
   // 返回 [{name, dir, version}] 当前装的 extensions
@@ -327,6 +607,9 @@ function main() {
   const bump = (s) => { summary[s] = (summary[s] || 0) + 1; };
   // 收集本次 upgrade/install 成功的工具 id，用于后续做环境变量恢复
   const envRestoreApps = new Set();
+  // cc-switch-restore 只认 APP_TARGETS 里登记过的 app（claude/codex）；
+  // 其它工具（如 dsh）没有对应的 CC Switch 配置，不进恢复列表
+  const RESTORE_APPS = new Set(['claude', 'codex']);
 
   for (const t of filteredTools) {
     const cur = installedVersion(t.pkg);
@@ -357,7 +640,7 @@ function main() {
         if (!res.error && res.status === 0) {
           status = 'installed'; verFrom = '-'; verTo = installedVersion(t.pkg) || lat;
           action = '已安装 ' + verTo;
-          envRestoreApps.add(t.id);
+          if (RESTORE_APPS.has(t.id)) envRestoreApps.add(t.id);
         } else {
           status = 'error'; action = '安装失败';
           err = extractErr(res, t);
@@ -373,7 +656,7 @@ function main() {
       if (!res.error && res.status === 0) {
         status = 'upgraded'; verTo = installedVersion(t.pkg) || lat;
         action = '已升级 ' + cur + ' → ' + verTo;
-        envRestoreApps.add(t.id);
+        if (RESTORE_APPS.has(t.id)) envRestoreApps.add(t.id);
       } else {
         status = 'error'; action = '升级失败（仍为 ' + cur + '）';
         err = extractErr(res, t);
@@ -469,7 +752,70 @@ function main() {
       }
     } catch (e) {
       piExt = { skipped: true, reason: 'exception', error: String((e && e.message) || e) };
-      out('    ✗ Pi extensions 处理异常: ' + String((e && e.message) || e));
+      out('    \u2717 pi extensions 处理异常: ' + String((e && e.message) || e));
+    }
+  }
+
+  // ===== DSH web: 探活 / 启动 / kill+重启（全程同步，见函数区注释）=====
+  let dshWeb = { skipped: true, reason: 'not-applicable' };
+  const dshInScope = !onlySet || onlySet.indexOf('dsh') !== -1;
+  if (dshInScope) {
+    out('--------------------------------------------------------------');
+    out('  … DSH web (' + DSH_WEB_URL + '):');
+    const running = probeTcpSync(DSH_WEB_HOST.host, DSH_WEB_HOST.port, 1500);
+    const ownerPid = running ? lookupOwnerPid(DSH_WEB_HOST.port) : null;
+    const base = {
+      running: running,
+      owner_pid: ownerPid,
+      url: DSH_WEB_URL,
+      host: DSH_WEB_HOST.host,
+      port: DSH_WEB_HOST.port,
+    };
+
+    if (CHECK_ONLY) {
+      dshWeb = Object.assign({ skipped: true, reason: 'check-only' }, base);
+      out(running
+        ? '    · 正在运行' + (ownerPid ? ' (pid ' + ownerPid + ')' : '') + ' — 检查模式不做改动'
+        : '    · 未运行 — 检查模式不做改动');
+    } else if (!running) {
+      if (LAUNCH_DSH_WEB || RESTART_DSH_WEB) {
+        out('    · 未运行，启动 `npx -y @deepseek-ai/dsh web --no-open` …');
+        dshWeb = Object.assign({ action: 'launched' }, base, launchDshWebAndWait());
+      } else {
+        dshWeb = Object.assign({ action: 'detected-not-running' }, base);
+        out('    · 未运行；启动需 --launch-dsh-web（一键脚本默认带此 flag）');
+      }
+    } else if (!RESTART_DSH_WEB) {
+      dshWeb = Object.assign({ action: 'detected-running' }, base);
+      out('    · 已在运行' + (ownerPid ? ' (pid ' + ownerPid + ')' : '') + ' — 不动它；重启需 --restart-dsh-web');
+    } else if (detectInDshGui()) {
+      dshWeb = Object.assign({ action: 'skipped-self-in-dsh-gui' }, base, { in_dsh_gui: true });
+      out('    ! 已在运行 (pid ' + (ownerPid || '?') + ')，且本脚本疑似由 DSH GUI 内的会话派生');
+      out('      为避免杀掉正在使用的 GUI，跳过重启；请关闭 DSH 后在普通终端重跑一键脚本');
+    } else {
+      const found = findDshWebPid(DSH_WEB_HOST.port);
+      if (!found.pid) {
+        dshWeb = Object.assign({ action: 'restart-no-pid' }, base);
+        out('    ! 找不到 DSH web 进程 pid（端口占用者与 ps 扫描均未命中），跳过 kill');
+      } else {
+        out('    · 已在运行 (pid ' + found.pid + (found.how === 'ps-scan' ? '，经 ps 扫描定位' : '') + ')，--restart-dsh-web：kill 后重启 …');
+        const k = killProcess(found.pid, 5000);
+        if (!k.ok) {
+          dshWeb = Object.assign({ action: 'kill-error' }, base, { kill: k, killed_pid: found.pid });
+          out('    ✗ kill 失败: ' + k.error + ' — 跳过启动');
+        } else {
+          out('    ✓ 已 kill pid ' + found.pid + ' (' + k.signal + ')');
+          const ancKilled = killDshAncestors(found.pid);
+          if (ancKilled.length > 0) out('    ✓ 已清理包装进程: pid ' + ancKilled.join(', '));
+          if (!waitForPortFree(DSH_WEB_HOST.host, DSH_WEB_HOST.port, 5000)) {
+            dshWeb = Object.assign({ action: 'port-still-busy' }, base, { kill: k, killed_pid: found.pid, pid_source: found.how, ancestors_killed: ancKilled });
+            out('    ! 端口仍被占用（可能有残留子进程），跳过启动');
+          } else {
+            out('    · 端口已释放，启动新实例 …');
+            dshWeb = Object.assign({ action: 'restarted' }, base, { kill: k, killed_pid: found.pid, pid_source: found.how, ancestors_killed: ancKilled }, launchDshWebAndWait());
+          }
+        }
+      }
     }
   }
 
@@ -491,9 +837,9 @@ function main() {
       summary: summary,
       env_restore: envRestore,
       pi_extensions: piExt,
+      dsh_web: dshWeb,
     }));
   }
-
   process.exit((summary.error || 0) > 0 ? 1 : 0);
 }
 

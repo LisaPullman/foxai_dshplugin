@@ -1,8 +1,10 @@
 #!/bin/bash
 # =============================================================
 # FoxAI 一键检查更新 — macOS 双击入口
-# 检查并自动安装/升级 5 款 AI CLI:
-#   Claude Code / Codex CLI / Gemini CLI / OpenCode / Pi
+# 检查并自动安装/升级 6 款 AI CLI:
+#   Claude Code / Codex CLI / Gemini CLI / OpenCode / Pi / DeepSeek Harness(dsh)
+# 并接管 DSH web(npx @deepseek-ai/dsh web,默认 http://127.0.0.1:3080):
+#   已在运行则先 kill 进程再重启新版,未运行则直接启动。
 # 需要已安装 Node.js 与网络；全程无需确认，结束后按回车关闭窗口。
 #
 # 提示：若双击被 Gatekeeper 拦截（未知开发者），
@@ -14,7 +16,7 @@
 # 双击打开时工作目录可能是 HOME，先回到脚本所在目录
 cd "$(dirname "$0")" || exit 1
 
-bash -c 'exec node scripts/update-cli-tools.js'
+bash -c 'exec node scripts/update-cli-tools.js --restart-dsh-web'
 rc=$?
 
 echo ""

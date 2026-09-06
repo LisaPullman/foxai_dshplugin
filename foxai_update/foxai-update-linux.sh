@@ -1,8 +1,10 @@
 #!/bin/bash
 # =============================================================
 # FoxAI 一键检查更新 — Linux 双击/终端入口
-# 检查并自动安装/升级 5 款 AI CLI:
-#   Claude Code / Codex CLI / Gemini CLI / OpenCode / Pi
+# 检查并自动安装/升级 6 款 AI CLI:
+#   Claude Code / Codex CLI / Gemini CLI / OpenCode / Pi / DeepSeek Harness(dsh)
+# 并接管 DSH web(npx @deepseek-ai/dsh web,默认 http://127.0.0.1:3080):
+#   已在运行则先 kill 进程再重启新版,未运行则直接启动。
 # 需要已安装 Node.js 与网络；全程无需确认，结束后按回车关闭。
 #
 # 桌面环境双击：确保本文件有可执行权限（chmod +x），
@@ -15,7 +17,7 @@
 
 cd "$(dirname "$0")" || exit 1
 
-node scripts/update-cli-tools.js
+node scripts/update-cli-tools.js --restart-dsh-web
 rc=$?
 
 echo ""

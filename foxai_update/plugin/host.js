@@ -138,8 +138,10 @@ function defineUpdateTool() {
   return harness.defineTool({
     name: 'foxai_cli_update',
     description:
-      '检查并安装/升级 5 款 AI CLI 编码工具（Claude Code、Codex CLI、Gemini CLI、OpenCode、Pi）。' +
+      '检查并安装/升级 6 款 AI CLI 编码工具（Claude Code、Codex CLI、Gemini CLI、OpenCode、Pi、DeepSeek Harness）。' +
       '未安装的自动通过 npm 全局安装，已安装但有新版的自动升级到最新；非 npm 渠道（brew 等）安装的会识别并跳过。' +
+      '执行更新时还会接管 DSH web（npx @deepseek-ai/dsh web，默认 http://127.0.0.1:3080）：' +
+      '未运行则启动；restart_dsh_web=true 时已运行则先 kill 再重启（从 DSH GUI 内调用会自动跳过 kill 以免自杀）。' +
       '默认执行更新；设置 check_only=true 则仅检查报告、不做任何改动。跨 macOS/Linux/Windows。',
     parameters: {
       type: 'object',
@@ -151,8 +153,13 @@ function defineUpdateTool() {
         },
         tools: {
           type: 'array',
-          items: { type: 'string', enum: ['claude', 'codex', 'gemini', 'opencode', 'pi'] },
-          description: '只处理这些工具（默认全部 5 个）',
+          items: { type: 'string', enum: ['claude', 'codex', 'gemini', 'opencode', 'pi', 'dsh'] },
+          description: '只处理这些工具（默认全部 6 个）',
+        },
+        restart_dsh_web: {
+          type: 'boolean',
+          description: '执行更新时若 DSH web 已在运行，先 kill 进程再用升级后的版本重启（默认 false，仅确保启动）',
+          default: false,
         },
       },
       required: [],
@@ -162,6 +169,11 @@ function defineUpdateTool() {
       const flags = [];
       if (a.check_only) flags.push('--check');
       if (Array.isArray(a.tools) && a.tools.length) flags.push('--only=' + a.tools.join(','));
+      if (!a.check_only) {
+        // GUI 内默认只「没跑才启动」（launch 安全）；kill+重启必须显式要求
+        flags.push('--launch-dsh-web');
+        if (a.restart_dsh_web) flags.push('--restart-dsh-web');
+      }
       flags.push('--json');
       try {
         const res = await runUpdateScript(flags);

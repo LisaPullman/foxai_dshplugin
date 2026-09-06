@@ -13,9 +13,10 @@ const args = {
   plugin: { kind: 'new', idPrefix: 'foxup' },
   name: 'foxai_cli_update',
   purpose:
-    '检查并安装/升级 5 款 AI CLI 编码工具（Claude Code、Codex CLI、Gemini CLI、OpenCode、Pi）：' +
+    '检查并安装/升级 6 款 AI CLI 编码工具（Claude Code、Codex CLI、Gemini CLI、OpenCode、Pi、DeepSeek Harness）：' +
     '未安装的自动 npm 全局安装，已安装的升级到最新版；支持仅检查模式与指定子集；' +
-    '识别 brew 等外部渠道并跳过；跨 macOS/Linux/Windows。核心脚本同时可作为开机一键脚本独立运行。',
+    '识别 brew 等外部渠道并跳过；执行更新时接管 DSH web（npx @deepseek-ai/dsh web，默认 127.0.0.1:3080）——' +
+    '未运行则启动，可选 kill 旧进程后重启；跨 macOS/Linux/Windows。核心脚本同时可作为开机一键脚本独立运行。',
   code: {
     host: hostCode,
     client: clientCode,

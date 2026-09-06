@@ -1,6 +1,6 @@
 # foxai_update — AI CLI 工具检查/安装/升级（DSH 插件 + 开机一键脚本）
 
-检查并维护 5 款 AI CLI 编码工具，未安装的自动通过 npm 全局安装，已安装的自动升级到最新版：
+检查并维护 6 款 AI CLI 编码工具，未安装的自动通过 npm 全局安装，已安装的自动升级到最新版：
 
 | id | 工具 | npm 包 | 二进制 |
 | --- | --- | --- | --- |
@@ -9,26 +9,29 @@
 | `gemini` | Gemini CLI | `@google/gemini-cli` | `gemini` |
 | `opencode` | OpenCode | `opencode-ai` | `opencode` |
 | `pi` | Pi | `@earendil-works/pi-coding-agent` | `pi` |
+| `dsh` | DeepSeek Harness | `@deepseek-ai/dsh` | `dsh` |
 
-升级后还会自动做两类自愈：
+升级后还会自动做三类自愈：
 
 1. **CC Switch 环境变量恢复** — claude 升级后从 `~/.cc-switch/cc-switch.db` 读当前激活 provider 的 env 段，写回 `~/.claude/settings.json`（含 `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` 等），避免 Claude 升级后环境变量丢失导致启动失败
 2. **Pi extensions 检查/升级** — 自动扫描 `~/.pi/agent/npm/` 下的 user packages（pi-mcp-adapter / pi-subagents / pi-web-access / pi-wechat-assistant 等），升级时调 `pi update --all` 一并处理 pi 自身 + 所有 extensions
+3. **DSH web 升级/重启** — dsh 升级到最新后接管其 web UI（`npx @deepseek-ai/dsh web`，默认 `http://127.0.0.1:3080`）的生命周期：一键脚本默认 kill 旧进程并用新版重启；未运行则直接启动
 
 **跨平台**：macOS / Linux / Windows 全支持（核心逻辑为纯 Node.js，无 bash 依赖）。
 
 ## 架构
 
 ```
-scripts/update-cli-tools.js   ★ 核心逻辑（升级 5 款 CLI）
+scripts/update-cli-tools.js   ★ 核心逻辑（升级 6 款 CLI + DSH web 接管）
 scripts/cc-switch-restore.js ★ CC Switch 环境变量恢复（升级后自愈）
+scripts/lib/tcp-probe.js      ★ TCP 探活子进程（DSH web 探测用，独立事件循环）
         ↑                ↑
 FoxAI一键检查更新.command   DSH 动态 Cordis 插件（plugin/host.js 内嵌这两个脚本）
 foxai-update-linux.sh         ├─ 工具 foxai_cli_update（agent 可调用）
 FoxAI一键检查更新.bat         └─ Web 结果卡片（plugin/client.js）
 ```
 
-- 双击入口只是薄包装：定位目录 → `node scripts/update-cli-tools.js` → 暂停窗口
+- 双击入口只是薄包装：定位目录 → `node scripts/update-cli-tools.js --restart-dsh-web` → 暂停窗口
 - DSH 插件把核心脚本以字符串内嵌进 host bundle（自包含，不依赖仓库路径），
   通过官方 `ctx.subprocess` 服务 `spawn(node, ['-e', 脚本, '--', flags])` 执行，
   解析脚本输出的 `##JSON##` 行返回结构化结果
@@ -52,6 +55,8 @@ node scripts/update-cli-tools.js                  # 检查并自动安装/升级
 node scripts/update-cli-tools.js --check          # 只看报告，不做任何改动
 node scripts/update-cli-tools.js --only pi,claude # 只处理子集
 node scripts/update-cli-tools.js --json           # 末尾追加 ##JSON## 行（机器可读）
+node scripts/update-cli-tools.js --launch-dsh-web  # 升级后确保 DSH web 在跑（没跑则启动）
+node scripts/update-cli-tools.js --restart-dsh-web # DSH web 在跑则 kill 后重启，没跑则启动
 ```
 
 ### 3) DSH 插件（agent 调用）
@@ -70,7 +75,8 @@ node scripts/update-cli-tools.js --json           # 末尾追加 ##JSON## 行（
 | 参数 | 类型 | 说明 |
 | --- | --- | --- |
 | `check_only` | boolean | `true` 仅检查报告，不改动（默认 `false` 执行更新） |
-| `tools` | string[] | 只处理这些 id（默认全部 5 个） |
+| `tools` | string[] | 只处理这些 id（默认全部 6 个） |
+| `restart_dsh_web` | boolean | `true` 时若 DSH web 已在运行，先 kill 进程再用升级后的版本重启（默认 `false`，仅确保启动） |
 
 返回结构：
 
@@ -92,6 +98,14 @@ node scripts/update-cli-tools.js --json           # 末尾追加 ##JSON## 行（
       elapsed_ms: 6008,
       results: [{ name: 'pi-mcp-adapter', status: 'ok', ... }]
     }
+  },
+  dsh_web: {               // DSH web 生命周期接管
+    action: 'restarted',   // launched / restarted / detected-running / detected-not-running /
+                           // skipped-self-in-dsh-gui / restart-no-pid / kill-error / port-still-busy
+    running: true, bound: true, stable: true,
+    url: 'http://127.0.0.1:3080', port: 3080,
+    killed_pid: 2499, pid: 22201, pid_source: 'ps-scan',
+    ancestors_killed: []   // 顺带清理的 npm exec 包装进程
   }
 }
 ```
@@ -153,13 +167,35 @@ pi 在 `~/.pi/agent/npm/node_modules/` 下管理 user extensions，本插件在�
 
 降级后实测：先把 `pi-wechat-assistant` 用 `npm install pi-wechat-assistant@0.1.0 --prefix ~/.pi/agent/npm` 降到 0.1.0，跑本插件一次，自动恢复到 0.3.1。
 
+## 自愈 3：DSH web 升级/重启
+
+dsh（DeepSeek Harness）作为第 6 款工具走 npm 检查/升级；升级完成后接管其 web UI（`npx @deepseek-ai/dsh web`，默认 `http://127.0.0.1:3080`，可用环境变量 `DSH_WEB_URL` 覆盖，如 `DSH_WEB_URL=http://127.0.0.1:9090`）的生命周期：
+
+**行为矩阵**：
+
+| 场景 | 无 flag | `--launch-dsh-web` | `--restart-dsh-web` |
+| --- | --- | --- | --- |
+| 未运行 | 仅报告 | 启动新实例 | 启动新实例 |
+| 已运行 | 仅报告，不动它 | 仅报告，不动它 | **kill 旧进程 → 等端口释放 → 重启** |
+
+一键脚本（`.command` / `.bat` / `.sh`）默认带 `--restart-dsh-web`——每次一键更新都会把 DSH web 换成升级后的新版。DSH 插件的「立即更新」默认只带 `--launch-dsh-web`（没跑才启动）；`restart_dsh_web: true` 才 kill 重启。
+
+**实现要点**：
+
+- 探活：独立子进程 `scripts/lib/tcp-probe.js` 做 TCP connect（主进程里同步等待会阻塞事件循环，socket 回调永远不触发，所以必须外移到子进程）；内嵌 `node -e` 运行的插件模式找不到该文件时退化为 lsof/netstat 端口占用判断
+- 进程定位：优先 lsof/netstat 找端口占用者（最准，识别自定义端口）；系统繁忙 lsof 超时（实测刚跑完 npm install 后可超 8s）时退回 `ps` 命令行扫描（`…/bin/dsh web` 本体与 `npm exec @deepseek-ai/dsh web` 包装器），双保险
+- kill 策略：SIGTERM → 5s 宽限 → SIGKILL；随后向上清理 dsh 相关包装进程（`npm exec` 等），遇到用户 shell 立即停手
+- 就绪复核：dsh 先 bind 端口、后加载 profile 插件——插件与新版本不兼容时会在就绪后数秒内退出，所以 bind 成功后再等 3s 复核一次（`stable: false` 会给出提示）
+- 防自杀：沿 ppid 链检测本进程是否从 DSH GUI 内派生（Unix 用 `ps`，Windows 用 PowerShell `Get-CimInstance`）；是则跳过 kill，避免一键脚本杀掉正在使用的 GUI 会话
+- 跨平台 sleep 用 `Atomics.wait`（不依赖 `/bin/sleep`，Windows 也可用）
+
 ## 平台兼容性
 
 | 事项 | macOS | Linux | Windows |
 | --- | --- | --- | --- |
 | 核心（Node.js） | ✅ | ✅ | ✅（npm 经 `shell` 解析，兼容 `npm.cmd`） |
 | 双击入口 | `.command` | `.sh` | `.bat` |
-| DSH 插件 | ✅ `ctx.subprocess` + `node -e` 内嵌脚本（host bundle 约 22KB，远低于 32K 参数上限） | ✅ | ✅ |
+| DSH 插件 | ✅ `ctx.subprocess` + `node -e` 内嵌脚本（`-e` 参数约 28KB，低于 Windows 32K 参数上限，但继续增大时需留意） | ✅ | ✅ |
 | 全局权限 | 默认前缀可写 | 若 EACCES，自动给出 `sudo` 或用户级 prefix（`npm config set prefix ~/.npm-global`）两种方案 | 默认前缀 `%APPDATA%\npm` 可写 |
 
 ## 常见问题
@@ -168,6 +204,8 @@ pi 在 `~/.pi/agent/npm/node_modules/` 下管理 user extensions，本插件在�
 - **插件激活后工具没出现 / 调用报 subprocess 不可用**：宿主需挂载 `@deepseek-ai/dsh-subprocess-local`（`dsh-base` 标准组成）。工具会降级返回等价的手动命令，不会静默失败。
 - **识别为 external**：说明该 CLI 是 brew/官方安装器装的。想交给本插件管理，先卸载原渠道版本（如 `brew uninstall gemini-cli`）再运行。
 - **升级期间正在使用某 CLI**：npm 替换的是磁盘文件，已运行的进程不受影响，下次启动生效。
+- **DSH web 重启后马上退出（`stable: false`）**：通常是 `~/.dsh/profiles/web` 下安装的第三方插件（如 `@linxin666/dsh-client-ui-skin-center` 等皮肤/面板类）与新版本 dsh 的 API 不兼容。到该 profile 目录执行 `npm update` 升级插件后重跑一键脚本；临时回退可 `npm i -g @deepseek-ai/dsh@<旧版本号>`。
+- **为什么 DSH 插件里默认不 kill 重启**：插件本身跑在 DSH GUI 的会话里，kill web 进程会断掉当前会话；一键脚本（在普通终端双击运行）才是重启 DSH web 的推荐入口。
 - **Pi extensions 在哪管理**：用 `pi install <npm pkg>` / `pi list` / `pi remove` 命令；本插件不安装新 extension（只升级已装的）。新装仍需走 `pi install`。
 
 ## 开发

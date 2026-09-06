@@ -1,15 +1,17 @@
 @echo off
 rem =============================================================
 rem FoxAI 一键检查更新 — Windows 双击入口
-rem 检查并自动安装/升级 5 款 AI CLI:
-rem   Claude Code / Codex CLI / Gemini CLI / OpenCode / Pi
+rem 检查并自动安装/升级 6 款 AI CLI:
+rem   Claude Code / Codex CLI / Gemini CLI / OpenCode / Pi / DeepSeek Harness(dsh)
+rem 并接管 DSH web(npx @deepseek-ai/dsh web,默认 http://127.0.0.1:3080):
+rem   已在运行则先 kill 进程再重启新版,未运行则直接启动。
 rem 需要已安装 Node.js 与网络；全程无需确认，结束后按任意键关闭窗口。
 rem 对应其他系统: macOS 用 FoxAI一键检查更新.command / Linux 用 foxai-update-linux.sh
 rem =============================================================
 chcp 65001 >nul
 cd /d "%~dp0"
 
-node scripts\update-cli-tools.js
+node scripts\update-cli-tools.js --restart-dsh-web
 set RC=%ERRORLEVEL%
 
 echo.
