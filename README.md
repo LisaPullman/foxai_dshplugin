@@ -12,6 +12,7 @@ foxai 的 DeepSeek 插件集合仓库,当前包含 [foxaippt](./foxaippt)(AI 网
 | [foxai_img2threejs](./foxai_img2threejs) | img2threejs 的 DSH 宿主插件(npm 持久 Plugin):把参考图 → 程序化 Three.js 模型的 Agent Skill 注册进 `ctx.skills`,`dsh plugin add` 一次安装、全會话可用;见 [README-DSH.md](./foxai_img2threejs/README-DSH.md) |
 | [foxai_sd2.5](./foxai_sd2.5) | DSH 动态 Cordis 插件:把豆包 Seedance 2.5 文生视频/图生视频的需求拆成结构化合同,产物是 host bundle + cordis args,见 [docs/README.md](./foxai_sd2.5/docs/README.md) |
 | [foxai-gpt-image-2](./foxai-gpt-image-2) | DSH 动态 Cordis 插件 + Node.js MCP server:把用户的自然语言需求转化为符合 GPT-Image-2 规范的工业级提示词(awesome-gpt-image-2 风格库,**26 模板 / 14 分类(含「照片转海报」) / 18 风格 / 10 场景**),零依赖、零密钥、纯前端;暴露 4 个 MCP 工具:`gpt_image2_library` / `gpt_image2_analyze` / `gpt_image2_assemble` / `gpt_image2_posterize` |
+| [foxai_update](./foxai_update) | DSH 动态 Cordis 插件 + 开机一键脚本:检查并安装/升级 5 款 AI CLI(Claude Code / Codex CLI / Gemini CLI / OpenCode / Pi,npm 全局通道);agent 工具 `foxai_cli_update`(支持仅检查/子集),**跨 macOS/Linux/Windows**(核心为纯 Node 脚本 + 三系统双击入口) |
 
 ## foxaippt 快速开始
 
@@ -93,3 +94,18 @@ node claude/mcp-server.mjs   # 以 stdio JSON-RPC 暴露给 MCP 客户端
 - ✅ `node --test scripts/build-plugin.test.mjs` — 8/8 通过
 
 更多细节见 [foxai-gpt-image-2/README.md](./foxai-gpt-image-2/README.md)。
+
+## foxai_update 快速开始
+
+```bash
+cd foxai_update
+node scripts/update-cli-tools.js --check   # 只看报告:5 款 AI CLI 的当前/最新版本
+node scripts/update-cli-tools.js           # 执行:缺失的安装,落后的升级到最新
+./install.sh                               # 构建 DSH 插件产物 dist/cordis-args.json(Windows 用 install.bat)
+```
+
+- 管辖:Claude Code / Codex CLI / Gemini CLI / OpenCode / Pi(npm 全局通道,识别 brew 等外部渠道并跳过)
+- 开机一键:macOS 双击 `FoxAI一键检查更新.command`,Windows 双击 `FoxAI一键检查更新.bat`,Linux `./foxai-update-linux.sh`
+- DSH 激活:`cordis_define` 贴入 `dist/cordis-args.json` → `cordis_run` → 审批;之后对 agent 说「检查并更新我的 AI CLI 工具」即可
+
+更多细节见 [foxai_update/README.md](./foxai_update/README.md)。
