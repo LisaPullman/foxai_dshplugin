@@ -13,6 +13,7 @@ foxai 的 DeepSeek 插件集合仓库,当前包含 [foxaippt](./foxaippt)(AI 网
 | [foxai_sd2.5](./foxai_sd2.5) | DSH 动态 Cordis 插件:把豆包 Seedance 2.5 文生视频/图生视频的需求拆成结构化合同,产物是 host bundle + cordis args,见 [docs/README.md](./foxai_sd2.5/docs/README.md) |
 | [foxai-gpt-image-2](./foxai-gpt-image-2) | DSH 动态 Cordis 插件 + Node.js MCP server:把用户的自然语言需求转化为符合 GPT-Image-2 规范的工业级提示词(awesome-gpt-image-2 风格库,**26 模板 / 14 分类(含「照片转海报」) / 18 风格 / 10 场景**),零依赖、零密钥、纯前端;暴露 4 个 MCP 工具:`gpt_image2_library` / `gpt_image2_analyze` / `gpt_image2_assemble` / `gpt_image2_posterize` |
 | [foxai_update](./foxai_update) | DSH 动态 Cordis 插件 + 开机一键脚本:检查并安装/升级 5 款 AI CLI(Claude Code / Codex CLI / Gemini CLI / OpenCode / Pi,npm 全局通道);agent 工具 `foxai_cli_update`(支持仅检查/子集),**跨 macOS/Linux/Windows**(核心为纯 Node 脚本 + 三系统双击入口) |
+| [foxai_H3 skill](./foxai_H3%20skill) | MiniMax H3(海螺3)视频提示词导演(Claude Code skill,零依赖):朦胧文字意向 → 专业文生视频提示词;**双输出模式**(海螺官网中文版 / API 结构化英文三字段 + 分镜时间戳 + 对白系统),附图生视频多分镜连贯系统,见 [README.md](./foxai_H3%20skill/README.md) |
 
 ## foxaippt 快速开始
 
