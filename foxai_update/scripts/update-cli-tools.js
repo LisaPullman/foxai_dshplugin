@@ -21,10 +21,12 @@
 //   unknown     无法查询 npm registry（多为网络问题）
 //   error       安装/升级失败
 //
-// DSH web（`npx @deepseek-ai/dsh web`，默认 http://127.0.0.1:3080，可用环境
-// 变量 DSH_WEB_URL 覆盖）在工具升级后接管其生命周期：--launch-dsh-web 未运
-// 行才启动；--restart-dsh-web 已运行则先 kill 再重启；从 DSH GUI 内派生的会
-// 话会自动跳过 kill 以免自杀；--check 模式只探活报告，不做任何改动。
+// DSH web（`dsh web`，全局安装，默认 http://127.0.0.1:3080，可用环境变量
+// DSH_WEB_URL 覆盖）在工具升级后接管其生命周期：--launch-dsh-web 未运行才
+// 启动；--restart-dsh-web 已运行则先 kill 再重启；从 DSH GUI 内派生的会话
+// 会自动跳过 kill 以免自杀；--check 模式只探活报告，不做任何改动。
+// dsh 版本可能被 TOOLS 注册表里的 pin 字段锁定（兼容性回退），启动时用全局
+// dsh 二进制而非 npx —— npx 每次从 registry 解析 latest，会绕开 pin。
 //
 // 升级后（仅对 upgraded/installed 项）会自动调用 cc-switch-restore ，
 // 从 ~/.cc-switch/cc-switch.db 把当前激活 provider 的 env 段写回
@@ -60,7 +62,14 @@ const TOOLS = [
   { id: 'gemini',   name: 'Gemini CLI',  pkg: '@google/gemini-cli',             bin: 'gemini' },
   { id: 'opencode', name: 'OpenCode',    pkg: 'opencode-ai',                    bin: 'opencode' },
   { id: 'pi',       name: 'Pi',          pkg: '@earendil-works/pi-coding-agent', bin: 'pi' },
-  { id: 'dsh',      name: 'DeepSeek Harness', pkg: '@deepseek-ai/dsh',           bin: 'dsh' },
+  { id: 'dsh',      name: 'DeepSeek Harness', pkg: '@deepseek-ai/dsh',           bin: 'dsh',
+    // 兼容性锁：0.1.2-rc.1 移除了 @deepseek-ai/dsh-settings 的 settingsNamespace
+    // 导出，~/.dsh/profiles/web 的插件生态（@linxin666/dsh-web-ui-all@0.3.6 的
+    // web-ui-settings 入口依赖它）尚未跟进，dsh web 会在 bind 端口后 2~8s 内
+    // 崩溃（ERR_CONNECTION_REFUSED）。插件侧 latest(0.3.6) 即当前已装版本，无可
+    // 升级项——在上游适配前锁在 0.1.1-rc.2（2026-09 验证可用）。插件生态追上后
+    // 删除本 pin 字段即恢复追最新。
+    pin: '0.1.1-rc.2' },
 ];
 
 // ---------- 参数解析（兼容 node file.js 与 node -e SCRIPT -- … 两种运行方式） ----------
@@ -136,6 +145,43 @@ function latestVersion(pkgName) {
   if (res.error || res.status !== 0) return '';
   const v = String(res.stdout || '').trim().split('\n').pop().trim();
   return v || '';
+}
+
+// 简易版本比较（覆盖本脚本用到的 x.y.z[-pre.n] 形态；非完整 semver）：
+// 数字段按数值比；同 core 下无预发布 > 有预发布；预发布段数字 < 字母。
+// 解析失败退化为字符串比较。返回 <0 / 0 / >0。
+function verCmp(a, b) {
+  if (a === b) return 0;
+  const parse = function (v) {
+    const m = String(v).trim().match(/^(\d+(?:\.\d+)*)(?:-([0-9A-Za-z.-]+))?$/);
+    if (!m) return null;
+    return {
+      core: m[1].split('.').map(Number),
+      pre: m[2] ? m[2].split('.').map(function (s) { return /^\d+$/.test(s) ? Number(s) : s; }) : null,
+    };
+  };
+  const pa = parse(a), pb = parse(b);
+  if (!pa || !pb) return a < b ? -1 : (a > b ? 1 : 0);
+  const n = Math.max(pa.core.length, pb.core.length);
+  for (let i = 0; i < n; i++) {
+    const x = pa.core[i] || 0, y = pb.core[i] || 0;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  if (!pa.pre && !pb.pre) return 0;
+  if (!pa.pre) return 1;
+  if (!pb.pre) return -1;
+  const m2 = Math.max(pa.pre.length, pb.pre.length);
+  for (let j = 0; j < m2; j++) {
+    const x = pa.pre[j], y = pb.pre[j];
+    if (x === y) continue;
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    if (typeof x === 'number' && typeof y === 'number') return x < y ? -1 : 1;
+    if (typeof x === 'number') return -1;
+    if (typeof y === 'number') return 1;
+    return x < y ? -1 : 1;
+  }
+  return 0;
 }
 
 // ---------- Pi extensions ----------
@@ -271,19 +317,40 @@ function killProcess(pid, graceMs) {
   return { ok: false, error: 'SIGKILL 后进程仍存活' };
 }
 
+// 全局 bin 路径：npm root -g = <prefix>/lib/node_modules（win: <prefix>\node_modules），
+// 全局可执行在 <prefix>/bin（win: <prefix> 本身，dsh.cmd）。找不到返回 ''。
+function globalBin(bin) {
+  try {
+    const prefix = path.dirname(path.dirname(NPM_ROOT));
+    const p = IS_WIN ? path.join(prefix, bin + '.cmd') : path.join(prefix, 'bin', bin);
+    return fs.existsSync(p) ? p : '';
+  } catch (_) { return ''; }
+}
+
+function dshPin() {
+  const t = TOOLS.filter(function (x) { return x.id === 'dsh'; })[0];
+  return (t && t.pin) || '';
+}
+
 function launchDshWeb() {
   // detached + unref:子进程在父进程退出后继续运行;父进程不等它退出。
-  const args = ['-y', '@deepseek-ai/dsh', 'web', '--no-open'];
-  if (DSH_WEB_HOST.port !== 3080) args.push('--port', String(DSH_WEB_HOST.port));
-  if (DSH_WEB_HOST.host !== '127.0.0.1') args.push('--host', DSH_WEB_HOST.host);
+  // 优先用全局安装的 dsh 二进制——版本受本脚本 pin 管控;`npx -y @deepseek-ai/dsh`
+  // 每次从 registry 解析 latest,会绕开 pin 拉到不兼容版本。全局二进制缺失
+  // (安装失败等)才退回 npx,且 spec 带 pin,不追 latest。
+  const pin = dshPin();
+  const spec = pin ? '@deepseek-ai/dsh@' + pin : '@deepseek-ai/dsh';
+  const bin = globalBin('dsh');
+  const argv = bin ? [bin, 'web', '--no-open'] : ['npx', '-y', spec, 'web', '--no-open'];
+  if (DSH_WEB_HOST.port !== 3080) argv.push('--port', String(DSH_WEB_HOST.port));
+  if (DSH_WEB_HOST.host !== '127.0.0.1') argv.push('--host', DSH_WEB_HOST.host);
   try {
-    const child = require('child_process').spawn('npx', args, {
+    const child = require('child_process').spawn(argv[0], argv.slice(1), {
       detached: true, stdio: 'ignore', shell: IS_WIN, cwd: homeDir(), windowsHide: true,
     });
     child.unref();
-    return { ok: true, pid: child.pid, argv: ['npx'].concat(args) };
+    return { ok: true, pid: child.pid, argv: argv };
   } catch (e) {
-    return { ok: false, error: String((e && e.message) || e), argv: ['npx'].concat(args) };
+    return { ok: false, error: String((e && e.message) || e), argv: argv };
   }
 }
 
@@ -420,12 +487,22 @@ function launchDshWebAndWait() {
     return Object.assign({ bound: false }, r);
   }
   out('    ✓ 已就绪: ' + DSH_WEB_URL);
-  // dsh web 先 bind 端口、后加载 profile 插件；插件与新版本 dsh 不兼容时会在
-  // 启动后数秒内退出。就绪后复核一次，避免「报告已就绪、实际已崩溃」的假阳性。
-  sleepSync(3000);
-  if (!probeTcpSync(DSH_WEB_HOST.host, DSH_WEB_HOST.port, 500)) {
-    out('    ! 进程在就绪后数秒内退出——通常是 ~/.dsh/profiles/web 下的插件与新版本 dsh 不兼容');
-    out('      可在该 profile 目录执行 npm update 升级插件后重试，或暂时回退旧版: npm i -g @deepseek-ai/dsh@<旧版本号>');
+  // dsh web 先 bind 端口、后加载 profile 插件；插件与当前 dsh 不兼容时会在
+  // bind 后数秒内退出（实测 0.1.2-rc.1 在 2~8s 内崩，单次 3s 复核抓不到）。
+  // 就绪后轮询 ~15s 全程存活才算稳定，避免「报告已就绪、实际已崩溃」的假阳性。
+  let stable = true;
+  for (let i = 0; i < 10; i++) {
+    sleepSync(1500);
+    if (!probeTcpSync(DSH_WEB_HOST.host, DSH_WEB_HOST.port, 500)) { stable = false; break; }
+  }
+  if (!stable) {
+    out('    ! 进程在就绪后 ~15s 内退出——通常是 ~/.dsh/profiles/web 下的插件与当前 dsh 不兼容');
+    const pin = dshPin();
+    if (pin) {
+      out('      本脚本已锁定兼容版本 ' + pin + '；若仍失败可在该 profile 目录执行 npm update 升级插件后重试');
+    } else {
+      out('      可在该 profile 目录执行 npm update 升级插件后重试，或暂时回退旧版: npm i -g @deepseek-ai/dsh@<旧版本号>');
+    }
     return Object.assign({ bound: true, stable: false }, r);
   }
   return Object.assign({ bound: true, stable: true }, r);
@@ -614,9 +691,12 @@ function main() {
   for (const t of filteredTools) {
     const cur = installedVersion(t.pkg);
     const lat = latestVersion(t.pkg);
-    let status = '', action = '', verFrom = cur || '-', verTo = lat || '-', err = '';
+    // 目标版本：有 pin（兼容性锁，见 TOOLS 注册表注释）用 pin，否则 registry
+    // latest。pin 是本地常量，即使网络拿不到 latest 也能照常比对/安装。
+    const target = t.pin || lat;
+    let status = '', action = '', verFrom = cur || '-', verTo = target || '-', err = '';
 
-    if (!lat) {
+    if (!target) {
       const bp = binProbe(t.bin);
       if (bp.exists) {
         status = 'external'; verFrom = bp.version || '-'; verTo = '-';
@@ -633,12 +713,12 @@ function main() {
         action = '非 npm 渠道安装（如 brew/scoop），跳过；如需接管请先卸载原渠道版本';
       } else if (CHECK_ONLY) {
         status = 'installable';
-        action = '未安装，将安装 ' + lat;
+        action = '未安装，将安装 ' + target;
       } else {
-        out('  … 正在安装 ' + t.name + ' (' + t.pkg + '@' + lat + ')');
-        const res = npm(['install', '-g', '--no-fund', '--no-audit', t.pkg + '@latest'], 600000);
+        out('  … 正在安装 ' + t.name + ' (' + t.pkg + '@' + target + ')');
+        const res = npm(['install', '-g', '--no-fund', '--no-audit', t.pkg + '@' + target], 600000);
         if (!res.error && res.status === 0) {
-          status = 'installed'; verFrom = '-'; verTo = installedVersion(t.pkg) || lat;
+          status = 'installed'; verFrom = '-'; verTo = installedVersion(t.pkg) || target;
           action = '已安装 ' + verTo;
           if (RESTORE_APPS.has(t.id)) envRestoreApps.add(t.id);
         } else {
@@ -646,19 +726,30 @@ function main() {
           err = extractErr(res, t);
         }
       }
-    } else if (cur === lat) {
-      status = 'ok'; action = '已是最新';
+    } else if (cur === target) {
+      status = 'ok';
+      if (t.pin && lat && lat !== cur) {
+        action = '已锁定 ' + cur + '（latest ' + lat + ' 因兼容性暂缓）';
+      } else {
+        action = '已是最新';
+      }
     } else if (CHECK_ONLY) {
-      status = 'upgradable'; action = '可升级 ' + cur + ' → ' + lat;
+      status = 'upgradable';
+      if (t.pin && verCmp(cur, target) > 0) {
+        action = '需回退 ' + cur + ' → ' + target + '（兼容性锁定 ' + target + '）';
+      } else {
+        action = '可升级 ' + cur + ' → ' + target;
+      }
     } else {
-      out('  … 正在升级 ' + t.name + ' ' + cur + ' → ' + lat);
-      const res = npm(['install', '-g', '--no-fund', '--no-audit', t.pkg + '@latest'], 600000);
+      const down = !!(t.pin && verCmp(cur, target) > 0);
+      out('  … 正在' + (down ? '回退 ' : '升级 ') + t.name + ' ' + cur + ' → ' + target);
+      const res = npm(['install', '-g', '--no-fund', '--no-audit', t.pkg + '@' + target], 600000);
       if (!res.error && res.status === 0) {
-        status = 'upgraded'; verTo = installedVersion(t.pkg) || lat;
-        action = '已升级 ' + cur + ' → ' + verTo;
+        status = 'upgraded'; verTo = installedVersion(t.pkg) || target;
+        action = (down ? '已回退 ' : '已升级 ') + cur + ' → ' + verTo;
         if (RESTORE_APPS.has(t.id)) envRestoreApps.add(t.id);
       } else {
-        status = 'error'; action = '升级失败（仍为 ' + cur + '）';
+        status = 'error'; action = (down ? '回退失败' : '升级失败') + '（仍为 ' + cur + '）';
         err = extractErr(res, t);
       }
     }
@@ -779,7 +870,7 @@ function main() {
         : '    · 未运行 — 检查模式不做改动');
     } else if (!running) {
       if (LAUNCH_DSH_WEB || RESTART_DSH_WEB) {
-        out('    · 未运行，启动 `npx -y @deepseek-ai/dsh web --no-open` …');
+        out('    · 未运行，启动 `dsh web --no-open`（全局二进制' + (dshPin() ? '，版本锁定 ' + dshPin() : '') + '）…');
         dshWeb = Object.assign({ action: 'launched' }, base, launchDshWebAndWait());
       } else {
         dshWeb = Object.assign({ action: 'detected-not-running' }, base);

@@ -15,7 +15,7 @@
 
 1. **CC Switch 环境变量恢复** — claude 升级后从 `~/.cc-switch/cc-switch.db` 读当前激活 provider 的 env 段，写回 `~/.claude/settings.json`（含 `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` 等），避免 Claude 升级后环境变量丢失导致启动失败
 2. **Pi extensions 检查/升级** — 自动扫描 `~/.pi/agent/npm/` 下的 user packages（pi-mcp-adapter / pi-subagents / pi-web-access / pi-wechat-assistant 等），升级时调 `pi update --all` 一并处理 pi 自身 + 所有 extensions
-3. **DSH web 升级/重启** — dsh 升级到最新后接管其 web UI（`npx @deepseek-ai/dsh web`，默认 `http://127.0.0.1:3080`）的生命周期：一键脚本默认 kill 旧进程并用新版重启；未运行则直接启动
+3. **DSH web 升级/重启** — dsh（版本受兼容性 pin 管控，见「自愈 3」）升级后接管其 web UI（全局 `dsh` 二进制，默认 `http://127.0.0.1:3080`）的生命周期：一键脚本默认 kill 旧进程并用新版重启；未运行则直接启动
 
 **跨平台**：macOS / Linux / Windows 全支持（核心逻辑为纯 Node.js，无 bash 依赖）。
 
@@ -169,7 +169,9 @@ pi 在 `~/.pi/agent/npm/node_modules/` 下管理 user extensions，本插件在�
 
 ## 自愈 3：DSH web 升级/重启
 
-dsh（DeepSeek Harness）作为第 6 款工具走 npm 检查/升级；升级完成后接管其 web UI（`npx @deepseek-ai/dsh web`，默认 `http://127.0.0.1:3080`，可用环境变量 `DSH_WEB_URL` 覆盖，如 `DSH_WEB_URL=http://127.0.0.1:9090`）的生命周期：
+dsh（DeepSeek Harness）作为第 6 款工具走 npm 检查/升级；升级完成后接管其 web UI（全局 `dsh` 二进制，默认 `http://127.0.0.1:3080`，可用环境变量 `DSH_WEB_URL` 覆盖，如 `DSH_WEB_URL=http://127.0.0.1:9090`）的生命周期：
+
+**版本锁定（pin）**：dsh 的目标版本受 `TOOLS` 注册表里的 `pin: '0.1.1-rc.2'` 管控——`0.1.2-rc.1` 移除了 `@deepseek-ai/dsh-settings` 的 `settingsNamespace` 导出，`~/.dsh/profiles/web` 的插件生态（`@linxin666/dsh-web-ui-all@0.3.6` 的 `web-ui-settings` 入口依赖它）尚未跟进，dsh web 会在 bind 端口后 2~8s 内崩溃（浏览器 `ERR_CONNECTION_REFUSED`）。因此：装了高版本的会**自动回退**到 pin；`--check` 显示 `已锁定 0.1.1-rc.2（latest … 因兼容性暂缓）`。启动用全局二进制而非 `npx -y`（npx 每次解析 registry latest，会绕开 pin）。上游插件适配后删除 pin 字段即恢复追最新。
 
 **行为矩阵**：
 
@@ -185,7 +187,7 @@ dsh（DeepSeek Harness）作为第 6 款工具走 npm 检查/升级；升级完�
 - 探活：独立子进程 `scripts/lib/tcp-probe.js` 做 TCP connect（主进程里同步等待会阻塞事件循环，socket 回调永远不触发，所以必须外移到子进程）；内嵌 `node -e` 运行的插件模式找不到该文件时退化为 lsof/netstat 端口占用判断
 - 进程定位：优先 lsof/netstat 找端口占用者（最准，识别自定义端口）；系统繁忙 lsof 超时（实测刚跑完 npm install 后可超 8s）时退回 `ps` 命令行扫描（`…/bin/dsh web` 本体与 `npm exec @deepseek-ai/dsh web` 包装器），双保险
 - kill 策略：SIGTERM → 5s 宽限 → SIGKILL；随后向上清理 dsh 相关包装进程（`npm exec` 等），遇到用户 shell 立即停手
-- 就绪复核：dsh 先 bind 端口、后加载 profile 插件——插件与新版本不兼容时会在就绪后数秒内退出，所以 bind 成功后再等 3s 复核一次（`stable: false` 会给出提示）
+- 就绪复核：dsh 先 bind 端口、后加载 profile 插件——插件与新版本不兼容时会在就绪后数秒内退出（实测 0.1.2-rc.1 在 bind 后 2~8s 崩，单次 3s 复核抓不到），所以 bind 成功后轮询 ~15s 全程存活才报 `stable: true`
 - 防自杀：沿 ppid 链检测本进程是否从 DSH GUI 内派生（Unix 用 `ps`，Windows 用 PowerShell `Get-CimInstance`）；是则跳过 kill，避免一键脚本杀掉正在使用的 GUI 会话
 - 跨平台 sleep 用 `Atomics.wait`（不依赖 `/bin/sleep`，Windows 也可用）
 
@@ -204,7 +206,7 @@ dsh（DeepSeek Harness）作为第 6 款工具走 npm 检查/升级；升级完�
 - **插件激活后工具没出现 / 调用报 subprocess 不可用**：宿主需挂载 `@deepseek-ai/dsh-subprocess-local`（`dsh-base` 标准组成）。工具会降级返回等价的手动命令，不会静默失败。
 - **识别为 external**：说明该 CLI 是 brew/官方安装器装的。想交给本插件管理，先卸载原渠道版本（如 `brew uninstall gemini-cli`）再运行。
 - **升级期间正在使用某 CLI**：npm 替换的是磁盘文件，已运行的进程不受影响，下次启动生效。
-- **DSH web 重启后马上退出（`stable: false`）**：通常是 `~/.dsh/profiles/web` 下安装的第三方插件（如 `@linxin666/dsh-client-ui-skin-center` 等皮肤/面板类）与新版本 dsh 的 API 不兼容。到该 profile 目录执行 `npm update` 升级插件后重跑一键脚本；临时回退可 `npm i -g @deepseek-ai/dsh@<旧版本号>`。
+- **DSH web 重启后马上退出（`stable: false`）**：通常是 `~/.dsh/profiles/web` 下安装的第三方插件（如 `@linxin666/dsh-web-ui-all` 等 skin/面板类）与新版本 dsh 的 API 不兼容（2026-09 实例：`0.1.2-rc.1` 移除 `settingsNamespace` 导出导致 `web-ui-settings` 入口加载失败）。脚本已用 pin 锁在 `0.1.1-rc.2` 自动规避；若 pin 后仍失败，到该 profile 目录执行 `npm update` 升级插件后重跑一键脚本。
 - **为什么 DSH 插件里默认不 kill 重启**：插件本身跑在 DSH GUI 的会话里，kill web 进程会断掉当前会话；一键脚本（在普通终端双击运行）才是重启 DSH web 的推荐入口。
 - **Pi extensions 在哪管理**：用 `pi install <npm pkg>` / `pi list` / `pi remove` 命令；本插件不安装新 extension（只升级已装的）。新装仍需走 `pi install`。
 
