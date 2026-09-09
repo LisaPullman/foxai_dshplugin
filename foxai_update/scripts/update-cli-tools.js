@@ -62,6 +62,7 @@ const TOOLS = [
   { id: 'gemini',   name: 'Gemini CLI',  pkg: '@google/gemini-cli',             bin: 'gemini' },
   { id: 'opencode', name: 'OpenCode',    pkg: 'opencode-ai',                    bin: 'opencode' },
   { id: 'pi',       name: 'Pi',          pkg: '@earendil-works/pi-coding-agent', bin: 'pi' },
+  { id: 'grok',     name: 'Grok CLI',    pkg: '@xai-official/grok',             bin: 'grok' },
   { id: 'dsh',      name: 'DeepSeek Harness', pkg: '@deepseek-ai/dsh',           bin: 'dsh',
     // 兼容性锁：0.1.2-rc.1 移除了 @deepseek-ai/dsh-settings 的 settingsNamespace
     // 导出，~/.dsh/profiles/web 的插件生态（@linxin666/dsh-web-ui-all@0.3.6 的

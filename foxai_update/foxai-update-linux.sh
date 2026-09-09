@@ -1,8 +1,8 @@
 #!/bin/bash
 # =============================================================
 # FoxAI 一键检查更新 — Linux 双击/终端入口
-# 检查并自动安装/升级 6 款 AI CLI:
-#   Claude Code / Codex CLI / Gemini CLI / OpenCode / Pi / DeepSeek Harness(dsh)
+# 检查并自动安装/升级 7 款 AI CLI:
+#   Claude Code / Codex CLI / Gemini CLI / OpenCode / Pi / Grok CLI / DeepSeek Harness(dsh)
 # 并接管 DSH web(全局 dsh 二进制,默认 http://127.0.0.1:3080):
 #   已在运行则先 kill 进程再重启新版,未运行则直接启动。
 #   dsh 版本受兼容性 pin 管控(当前锁 0.1.1-rc.2,高于 pin 自动回退)。

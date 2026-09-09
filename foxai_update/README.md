@@ -1,6 +1,6 @@
 # foxai_update — AI CLI 工具检查/安装/升级（DSH 插件 + 开机一键脚本）
 
-检查并维护 6 款 AI CLI 编码工具，未安装的自动通过 npm 全局安装，已安装的自动升级到最新版：
+检查并维护 7 款 AI CLI 编码工具，未安装的自动通过 npm 全局安装，已安装的自动升级到最新版：
 
 | id | 工具 | npm 包 | 二进制 |
 | --- | --- | --- | --- |
@@ -9,6 +9,7 @@
 | `gemini` | Gemini CLI | `@google/gemini-cli` | `gemini` |
 | `opencode` | OpenCode | `opencode-ai` | `opencode` |
 | `pi` | Pi | `@earendil-works/pi-coding-agent` | `pi` |
+| `grok` | Grok CLI | `@xai-official/grok` | `grok` |
 | `dsh` | DeepSeek Harness | `@deepseek-ai/dsh` | `dsh` |
 
 升级后还会自动做三类自愈：
@@ -22,7 +23,7 @@
 ## 架构
 
 ```
-scripts/update-cli-tools.js   ★ 核心逻辑（升级 6 款 CLI + DSH web 接管）
+scripts/update-cli-tools.js   ★ 核心逻辑（升级 7 款 CLI + DSH web 接管）
 scripts/cc-switch-restore.js ★ CC Switch 环境变量恢复（升级后自愈）
 scripts/lib/tcp-probe.js      ★ TCP 探活子进程（DSH web 探测用，独立事件循环）
         ↑                ↑
@@ -75,7 +76,7 @@ node scripts/update-cli-tools.js --restart-dsh-web # DSH web 在跑则 kill 后�
 | 参数 | 类型 | 说明 |
 | --- | --- | --- |
 | `check_only` | boolean | `true` 仅检查报告，不改动（默认 `false` 执行更新） |
-| `tools` | string[] | 只处理这些 id（默认全部 6 个） |
+| `tools` | string[] | 只处理这些 id（默认全部 7 个） |
 | `restart_dsh_web` | boolean | `true` 时若 DSH web 已在运行，先 kill 进程再用升级后的版本重启（默认 `false`，仅确保启动） |
 
 返回结构：
@@ -84,7 +85,7 @@ node scripts/update-cli-tools.js --restart-dsh-web # DSH web 在跑则 kill 后�
 {
   success: true,
   check_only: false,
-  results: [{ id, name, status, installed, latest, action, error }],  // 5 个 CLI
+  results: [{ id, name, status, installed, latest, action, error }],  // 各 CLI
   summary: { ok: 4, upgraded: 1 },
   output_tail: "...",      // 最后 1500 字符人类可读输出
   env_restore: {           // CC Switch 环境变量恢复
@@ -134,6 +135,7 @@ Web 端同时出现结果卡片：状态表 + 「检查更新」/「立即更新
 | `claude` | `~/.claude/settings.json` | 合并 `env` 段，保留 `tui` / `permissions` 等其他顶层 key |
 | `codex` | `~/.codex/auth.json` | codex 用 `auth.json` 而非 `config.toml` 存 API key |
 | `opencode` / `gemini` / `pi` | 对应配置文件 | 当前用户未在 CC Switch 配置 is_current=1 provider，自动 `skipped` |
+| `grok` | —（不参与） | Grok CLI 自带 `grok login` OAuth 认证，不在恢复范围内 |
 
 **跨平台**：
 - macOS / Linux — 用系统 `sqlite3` CLI 读 DB（无需 npm 依赖）
@@ -169,7 +171,7 @@ pi 在 `~/.pi/agent/npm/node_modules/` 下管理 user extensions，本插件在�
 
 ## 自愈 3：DSH web 升级/重启
 
-dsh（DeepSeek Harness）作为第 6 款工具走 npm 检查/升级；升级完成后接管其 web UI（全局 `dsh` 二进制，默认 `http://127.0.0.1:3080`，可用环境变量 `DSH_WEB_URL` 覆盖，如 `DSH_WEB_URL=http://127.0.0.1:9090`）的生命周期：
+dsh（DeepSeek Harness）作为第 7 款工具走 npm 检查/升级；升级完成后接管其 web UI（全局 `dsh` 二进制，默认 `http://127.0.0.1:3080`，可用环境变量 `DSH_WEB_URL` 覆盖，如 `DSH_WEB_URL=http://127.0.0.1:9090`）的生命周期：
 
 **版本锁定（pin）**：dsh 的目标版本受 `TOOLS` 注册表里的 `pin: '0.1.1-rc.2'` 管控——`0.1.2-rc.1` 移除了 `@deepseek-ai/dsh-settings` 的 `settingsNamespace` 导出，`~/.dsh/profiles/web` 的插件生态（`@linxin666/dsh-web-ui-all@0.3.6` 的 `web-ui-settings` 入口依赖它）尚未跟进，dsh web 会在 bind 端口后 2~8s 内崩溃（浏览器 `ERR_CONNECTION_REFUSED`）。因此：装了高版本的会**自动回退**到 pin；`--check` 显示 `已锁定 0.1.1-rc.2（latest … 因兼容性暂缓）`。启动用全局二进制而非 `npx -y`（npx 每次解析 registry latest，会绕开 pin）。上游插件适配后删除 pin 字段即恢复追最新。
 

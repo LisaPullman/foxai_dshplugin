@@ -138,7 +138,7 @@ function defineUpdateTool() {
   return harness.defineTool({
     name: 'foxai_cli_update',
     description:
-      '检查并安装/升级 6 款 AI CLI 编码工具（Claude Code、Codex CLI、Gemini CLI、OpenCode、Pi、DeepSeek Harness）。' +
+      '检查并安装/升级 7 款 AI CLI 编码工具（Claude Code、Codex CLI、Gemini CLI、OpenCode、Pi、Grok CLI、DeepSeek Harness）。' +
       '未安装的自动通过 npm 全局安装，已安装但有新版的自动升级到最新；非 npm 渠道（brew 等）安装的会识别并跳过；' +
       'dsh 版本受兼容性 pin 管控（当前锁 0.1.1-rc.2，高于 pin 的版本会被自动回退——0.1.2-rc.1 与 web profile 插件生态不兼容）。' +
       '执行更新时还会接管 DSH web（全局 dsh 二进制，默认 http://127.0.0.1:3080）：' +
@@ -154,8 +154,8 @@ function defineUpdateTool() {
         },
         tools: {
           type: 'array',
-          items: { type: 'string', enum: ['claude', 'codex', 'gemini', 'opencode', 'pi', 'dsh'] },
-          description: '只处理这些工具（默认全部 6 个）',
+          items: { type: 'string', enum: ['claude', 'codex', 'gemini', 'opencode', 'pi', 'grok', 'dsh'] },
+          description: '只处理这些工具（默认全部 7 个）',
         },
         restart_dsh_web: {
           type: 'boolean',
