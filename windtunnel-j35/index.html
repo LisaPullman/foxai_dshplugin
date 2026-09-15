@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>数字风洞 · 歼-35 舰载机</title>
+  <link rel="stylesheet" href="./src/styles.css">
+</head>
+<body>
+  <div id="boot">
+    <div class="boot-inner">
+      <i class="boot-ring r1"></i><i class="boot-ring r2"></i><i class="boot-ring r3"></i>
+      <div class="boot-title">数字风洞 · 歼-35 舰载机</div>
+      <div class="boot-sub" data-i18n="subtitle">Web 3D 数字风洞模拟器（简化气动模型）</div>
+      <div class="boot-bar"><i></i></div>
+    </div>
+  </div>
+
+  <canvas id="gl"></canvas>
+
+  <!-- HUD 装饰层：四角框线 + 扫描线 + 状态灯 -->
+  <div id="hudLayer" aria-hidden="true">
+    <i class="hud-corner tl"></i><i class="hud-corner tr"></i>
+    <i class="hud-corner bl"></i><i class="hud-corner br"></i>
+    <div id="hudStatus">
+      <span class="led"></span>
+      <span class="hud-status-text">WT-J35 // FLOW SOLVER <b>ONLINE</b></span>
+    </div>
+    <div id="hudGrid"></div>
+  </div>
+  <div id="scanlines" aria-hidden="true"></div>
+
+  <!-- 顶部菜单栏 -->
+  <header id="topBar">
+    <div class="brand"> WT·J35 </div>
+    <nav id="modeTabs"></nav>
+    <div class="top-actions">
+      <select id="camSel" title="Camera"></select>
+      <button id="btnLang" class="ghost">EN</button>
+      <button id="btnHide" class="ghost" data-i18n="hidePanels">隐藏面板</button>
+      <button id="btnFull" class="ghost" data-i18n="fullscreen">全屏</button>
+    </div>
+  </header>
+
+  <!-- 左侧控制面板 -->
+  <aside id="leftPanel" class="glass"></aside>
+
+  <!-- 右侧参数面板 -->
+  <aside id="rightPanel" class="glass">
+    <div class="sec-title" data-i18n="paramsTitle">实时气动参数</div>
+    <div id="gauges">
+      <canvas id="gaugeU" width="118" height="104"></canvas>
+      <canvas id="gaugeM" width="118" height="104"></canvas>
+      <canvas id="gaugeA" width="118" height="104"></canvas>
+      <div class="gauge-labels">
+        <span data-i18n="gaugeU">风速</span><span data-i18n="gaugeM">马赫数</span><span data-i18n="gaugeA">攻角</span>
+      </div>
+    </div>
+    <div id="paramList"></div>
+    <div class="status-block">
+      <div class="status-row"><span data-i18n="statusTunnel">风洞状态</span><b id="statusTunnelVal" style="color:#00E5FF">—</b></div>
+      <div class="status-row"><span data-i18n="statusSample">数据采样频率</span><b>20 Hz</b></div>
+      <div class="status-row"><span data-i18n="statusSolver">流场求解</span>
+        <select id="solverSel"><option value="analytic" data-i18n="solverAnalytic">解析近似</option><option value="numeric" data-i18n="solverNumeric">数值求解</option></select>
+      </div>
+      <div class="status-row"><span data-i18n="statusUnits">单位制</span><b data-i18n="unitsSI">SI（国际单位制）</b></div>
+      <div class="status-row assume"><span data-i18n="assumptions" style="font-size:10px;opacity:.7;line-height:1.5">简化假设：不可压缩/低速可压缩 · 无粘性主导分离预测 · 忽略机身弹性形变 · 忽略发动机进气畸变</span></div>
+    </div>
+    <div id="phenomenon">
+      <div class="sec-title" data-i18n="phenomenonTitle">当前气动现象</div>
+      <p id="phenomenonText">—</p>
+    </div>
+  </aside>
+
+  <!-- 底部状态栏 -->
+  <footer id="bottomBar" class="glass">
+    <div id="disclaimer" data-i18n="disclaimer">⚠️ 本模拟采用简化空气动力学模型，用于教育和可视化展示，不可用于真实飞行测试、工程认证或性能评估。</div>
+    <div class="bottom-main">
+      <div id="chartTitles"></div>
+      <div id="charts">
+        <canvas id="ch1" width="200" height="96"></canvas>
+        <canvas id="ch2" width="200" height="96"></canvas>
+        <canvas id="ch3" width="200" height="96"></canvas>
+        <canvas id="ch4" width="200" height="96"></canvas>
+        <canvas id="ch5" width="200" height="96"></canvas>
+        <canvas id="ch6" width="200" height="96"></canvas>
+      </div>
+      <div class="bottom-actions">
+        <button id="btnPause" data-i18n="pauseRec">暂停记录</button>
+        <button id="btnStep" data-i18n="stepOnce">单步</button>
+        <button id="btnClear" data-i18n="clearData">清空数据</button>
+        <div class="legend">
+          <span data-i18n="legendTitle">速度比 U_local/U∞</span>
+          <canvas id="legendBar" width="150" height="26"></canvas>
+        </div>
+      </div>
+    </div>
+    <div id="hint" data-i18n="hint">左键拖拽旋转 · 右键平移 · 滚轮缩放 · 单击机身查看局部参数 · 双击部件聚焦</div>
+  </footer>
+
+  <div id="tooltip"></div>
+  <div id="probe"></div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
