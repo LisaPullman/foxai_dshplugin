@@ -78,6 +78,12 @@ const TOOLS = [
     // 升级项——在上游适配前锁在 0.1.1-rc.2（2026-09 验证可用）。插件生态追上后
     // 删除本 pin 字段即恢复追最新。
     pin: '0.1.1-rc.2' },
+  // herdr：终端工作区管理器（AI coding agents 用），Homebrew 渠道。ensure-only：
+  // 只保证「装没装」——未装则 brew install，已装即报 ok，不查 registry、不做
+  // 版本监测/升级（升级交给用户手动 brew upgrade）。注意 npm 上的 herdr 是
+  // 同名占位包（0.0.0 不可用），绝不能走 npm 渠道安装。
+  { id: 'herdr',   name: 'Herdr',       pkg: '',                               bin: 'herdr',
+    ensureOnly: 'brew' },
 ];
 
 // ---------- 参数解析（兼容 node file.js 与 node -e SCRIPT -- … 两种运行方式） ----------
@@ -104,6 +110,15 @@ const EMIT_JSON = OPTS.json;
 const NO_RESTORE = process.argv.indexOf('--no-restore') !== -1;
 const LAUNCH_DSH_WEB = process.argv.indexOf('--launch-dsh-web') !== -1;
 const RESTART_DSH_WEB = process.argv.indexOf('--restart-dsh-web') !== -1;
+// 自动从 ~/.dsh/profiles/web/package.json 的 dsh.profile.bundles 移除 dsh web 启动失败时
+// 报错的插件条目(常见: GitHub 源 prepack 没跑导致 shared/ 缺失、插件作者把 loader name
+// 写成了跟 bundle 名字不一样的形式)。操作前会备份原文件(.bak.<ts>),只移除 stderr
+// 中明确提到的 bundle,避免误伤其它正常插件。一键脚本默认开启;core 调用方可用
+// --no-auto-disable-dsh-plugins 关掉。
+const AUTO_DISABLE_DSH_BROKEN = (function () {
+  if (process.argv.indexOf('--no-auto-disable-dsh-plugins') !== -1) return false;
+  return process.argv.indexOf('--auto-disable-dsh-plugins') !== -1;
+})();
 const DSH_WEB_URL = process.env.DSH_WEB_URL || 'http://127.0.0.1:3080';
 const DSH_WEB_HOST = (function () {
   try {
@@ -353,26 +368,173 @@ function dshPin() {
   return (t && t.pin) || '';
 }
 
+// 安全读文件尾部（子进程可能未写出、文件不存在、超过 maxBytes 都容错）
+function readLogTail(p, maxBytes) {
+  try {
+    if (!p || !fs.existsSync(p)) return '';
+    const st = fs.statSync(p);
+    if (!st.size) return '';
+    const fd = fs.openSync(p, 'r');
+    try {
+      const len = Math.min(st.size, maxBytes || 2000);
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, st.size - len);
+      return String(buf).replace(/\s+$/, '');
+    } finally {
+      try { fs.closeSync(fd); } catch (_) {}
+    }
+  } catch (_) { return ''; }
+}
+
+// 把多行文本每行加缩进，便于嵌进脚本输出
+function indentLines(text, prefix) {
+  return String(text || '').split(/\r?\n/).map(function (l) { return prefix + l; }).join('\n');
+}
+
+// 从 dsh web 启动失败 stderr 中识别「在 dsh.profile.bundles 数组里」的损坏 bundle。
+// 启发式: stderr 里 loader 报错会引用「插件在 bundle 列表里的名字」或「插件 package.json
+// 里的 name 字段」,两者经常不一样(如 bundle=`@dsh-external/dsh-client-ui-skin-maid-atelier` 、
+// loader name=`@smalltailqwq/dsh-client-ui-skin-maid-atelier`)。对每个 bundle 同时尝试:
+//   1) 完整路径出现在 stderr → 命中
+//   2) 去掉 @scope/ 后的末段名出现在 stderr → 命中(覆盖 scope 不一致的情况)
+// 3) bundle 的末段名以 loader entry id 作为后缀(如 id=`ui-skin-maid-atelier`、
+//    bundle 末段=`dsh-client-ui-skin-maid-atelier`)→ 取末 2 段弱匹配
+function detectBrokenDshBundles(errText, allBundles) {
+  if (!errText || !Array.isArray(allBundles) || allBundles.length === 0) return [];
+  const out = [];
+  const loaderIds = [];
+  const re = /failed to import loader entry ([^\s(]+)/g;
+  let m;
+  while ((m = re.exec(errText)) !== null) loaderIds.push(m[1]);
+  for (const b of allBundles) {
+    if (!b || typeof b !== 'string') continue;
+    if (errText.indexOf(b) !== -1) { out.push(b); continue; }
+    const nameOnly = b.replace(/^@[^/]+\//, '');
+    if (nameOnly && errText.indexOf(nameOnly) !== -1) { out.push(b); continue; }
+    if (loaderIds.length > 0) {
+      const tail = nameOnly.split('-').slice(-2).join('-'); // "dsh-client-ui-skin-maid-atelier" → "ui-skin-maid-atelier"
+      for (const id of loaderIds) {
+        if (tail && (id === tail || tail.endsWith(id) || id.endsWith(tail))) {
+          out.push(b); break;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+// 从 ~/.dsh/profiles/web/package.json 的 dsh.profile.bundles 里移除传入的 bundle。
+// 流程: 读 → 备份(.bak.<ts>)→ 改 → 写回;任何步骤失败都尝试回滚。
+// 备份路径会返回,用户后续可手动 cp 回来恢复。
+function disableBrokenDshBundlesInProfile(brokenBundles) {
+  const result = {
+    ok: false,
+    profile_dir: '',
+    pkg_path: '',
+    backup_path: '',
+    before: [],
+    after: [],
+    disabled: [],
+    error: '',
+  };
+  const profileDir = (process.env.DSH_PROFILE_DIR && process.env.DSH_PROFILE_DIR.trim()) ||
+    path.join(homeDir(), '.dsh', 'profiles', 'web');
+  const pkgPath = path.join(profileDir, 'package.json');
+  result.profile_dir = profileDir;
+  result.pkg_path = pkgPath;
+  if (!fs.existsSync(pkgPath)) {
+    result.error = 'profile package.json 不存在: ' + pkgPath;
+    return result;
+  }
+  let pkgText, pkg;
+  try { pkgText = fs.readFileSync(pkgPath, 'utf8'); }
+  catch (e) { result.error = '读取失败: ' + String((e && e.message) || e); return result; }
+  try { pkg = JSON.parse(pkgText); }
+  catch (e) { result.error = 'package.json 解析失败: ' + String((e && e.message) || e); return result; }
+  const bundles = pkg && pkg.dsh && pkg.dsh.profile && pkg.dsh.profile.bundles;
+  if (!Array.isArray(bundles)) {
+    result.error = 'package.json 缺少 dsh.profile.bundles 数组';
+    return result;
+  }
+  const brokenSet = new Set(brokenBundles);
+  const remaining = bundles.filter(function (b) { return !brokenSet.has(b); });
+  if (remaining.length === bundles.length) {
+    result.ok = true;
+    result.before = bundles.slice();
+    result.after = bundles.slice();
+    result.disabled = [];
+    result.error = 'no-match'; // 信息性:未在 bundles 里找到匹配项
+    return result;
+  }
+  // 备份
+  const ts = Date.now();
+  const backup = pkgPath + '.bak.' + ts;
+  try { fs.copyFileSync(pkgPath, backup); }
+  catch (e) { result.error = '备份失败: ' + String((e && e.message) || e); return result; }
+  // 改 + 写回（保持 2 空格缩进，与现有风格一致）
+  pkg.dsh.profile.bundles = remaining;
+  try {
+    fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n', 'utf8');
+  } catch (e) {
+    try { fs.copyFileSync(backup, pkgPath); } catch (_) {}
+    result.error = '写回失败已回滚: ' + String((e && e.message) || e);
+    return result;
+  }
+  result.ok = true;
+  result.before = bundles.slice();
+  result.after = remaining.slice();
+  result.disabled = bundles.filter(function (b) { return brokenSet.has(b); });
+  result.backup_path = backup;
+  return result;
+}
+
 function launchDshWeb() {
   // detached + unref:子进程在父进程退出后继续运行;父进程不等它退出。
   // 优先用全局安装的 dsh 二进制——版本受本脚本 pin 管控;`npx -y @deepseek-ai/dsh`
   // 每次从 registry 解析 latest,会绕开 pin 拉到不兼容版本。全局二进制缺失
   // (安装失败等)才退回 npx,且 spec 带 pin,不追 latest。
+  //
+  // 子进程 stdout/stderr 重定向到临时日志文件,失败诊断用 —— stdio:'ignore' 时
+  // dsh web 即便崩了也看不到任何错误,只能等 60s 超时猜原因。文件由子进程 fd
+  // 持有,父 closeSync 不影响;子进程退出后文件仍在,可安全读取。
   const pin = dshPin();
   const spec = pin ? '@deepseek-ai/dsh@' + pin : '@deepseek-ai/dsh';
   const bin = globalBin('dsh');
   const argv = bin ? [bin, 'web', '--no-open'] : ['npx', '-y', spec, 'web', '--no-open'];
   if (DSH_WEB_HOST.port !== 3080) argv.push('--port', String(DSH_WEB_HOST.port));
   if (DSH_WEB_HOST.host !== '127.0.0.1') argv.push('--host', DSH_WEB_HOST.host);
+
+  const os = require('os');
+  const tag = 'foxai-dsh-web-' + Date.now() + '-' + process.pid + '-' +
+    Math.floor(Math.random() * 1e6).toString(36);
+  const outLog = path.join(os.tmpdir(), tag + '.out.log');
+  const errLog = path.join(os.tmpdir(), tag + '.err.log');
+  let outFd = -1, errFd = -1;
   try {
-    const child = require('child_process').spawn(argv[0], argv.slice(1), {
-      detached: true, stdio: 'ignore', shell: IS_WIN, cwd: homeDir(), windowsHide: true,
-    });
-    child.unref();
-    return { ok: true, pid: child.pid, argv: argv };
+    outFd = fs.openSync(outLog, 'w');
+    errFd = fs.openSync(errLog, 'w');
   } catch (e) {
-    return { ok: false, error: String((e && e.message) || e), argv: argv };
+    return { ok: false, error: 'open tmp log 失败: ' + String((e && e.message) || e), argv: argv };
   }
+  let child;
+  try {
+    child = require('child_process').spawn(argv[0], argv.slice(1), {
+      detached: true,
+      stdio: ['ignore', outFd, errFd],
+      shell: IS_WIN,
+      cwd: homeDir(),
+      windowsHide: true,
+    });
+  } catch (e) {
+    try { fs.closeSync(outFd); } catch (_) {}
+    try { fs.closeSync(errFd); } catch (_) {}
+    return { ok: false, error: 'spawn 失败: ' + String((e && e.message) || e), argv: argv };
+  }
+  child.unref();
+  // 父进程关闭 fd;文件由子进程 fd 持有;子进程退出后日志仍可读
+  try { fs.closeSync(outFd); } catch (_) {}
+  try { fs.closeSync(errFd); } catch (_) {}
+  return { ok: true, pid: child.pid, argv: argv, out_log: outLog, err_log: errLog };
 }
 
 // 检测本进程是否从 DSH GUI 内 spawn (启发式: ppid 链上含 dsh/web/deepseek-harness)
@@ -495,7 +657,307 @@ function waitForBind(host, port, timeoutMs) {
   return false;
 }
 
-function launchDshWebAndWait() {
+// 在 auto-disable 流程里被调用:从 profile package.json 读 bundles,根据 stderr 识别
+// 损坏条目,备份并移除。所有 IO/解析失败都返回 { tried: true, ok: false, error: ... }。
+// 不直接抛异常,调用方根据返回值决定要不要继续重试。
+// ---------- DSH 插件自愈（在 auto-disable 之前先尝试修复，治得好就不砍功能） ----------
+// 两个已知的「插件本体没坏、只是安装形态不对」的故障模式：
+//
+// A. @openviking/dsh-memory-plugin 缺 shared/：上游 OpenViking#4773 起 shared/
+//    改为 pack 时由 examples/memory-plugin-shared/sync.mjs 生成（.gitignore 覆盖、
+//    git 里没有），而 dsh 的安装器从 GitHub 按文件逐个下载、没法跑生成器 →
+//    client.mjs import ./shared/ov-http.mjs 直接 ERR_MODULE_NOT_FOUND。
+//    自愈：从 pnpm-lock.yaml 读出锁定的 commit，浅取该 commit 的 checkout，
+//    按「import 闭包」把 lib/ 里的模块拷进 shared/（与 sync.mjs 产物等价——
+//    同样的闭包规则 + 同样的 GENERATED 头）。刻意不执行上游 sync.mjs 本身
+//    （外部脚本不可信），闭包计算是本脚本自己的实现。
+// B. bundle 目录名 ≠ 包真实名：如 maid-atelier 皮肤以
+//    @dsh-external/dsh-client-ui-skin-maid-atelier 为依赖键安装（目录名），
+//    但其 cordis.patch.yml 的 loader entry 用真实包名 @smalltailqwq/...，
+//    Node 从 profile root 按真实名解析不到 → Cannot find package。
+//    自愈：扫 node_modules 下 package.json name === 报错缺的包名的目录，
+//    建 node_modules/<真实名> → <别名目录> 的 symlink。
+
+function dshProfileDir() {
+  return (process.env.DSH_PROFILE_DIR && process.env.DSH_PROFILE_DIR.trim()) ||
+    path.join(homeDir(), '.dsh', 'profiles', 'web');
+}
+
+// 三种 import 形式的说明符提取（static from / dynamic import() / 副作用 import）。
+// 与上游 sync.mjs 的三组正则保持一致，保证闭包结果一致。
+const OV_STATIC_IMPORT_RE = /(?:^|[\s;(=])(?:import|export)\b[^;'"]*?from\s*["']([^"']+)["']/g;
+const OV_DYNAMIC_IMPORT_RE = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
+const OV_SIDE_EFFECT_IMPORT_RE = /(?:^|[\s;])import\s*["']([^"']+)["']/g;
+function srcImportSpecs(source) {
+  const found = [];
+  for (const re of [OV_STATIC_IMPORT_RE, OV_DYNAMIC_IMPORT_RE, OV_SIDE_EFFECT_IMPORT_RE]) {
+    re.lastIndex = 0;
+    let m; while ((m = re.exec(source))) found.push(m[1]);
+  }
+  return found;
+}
+
+// 同步递归收集源码文件（.mjs/.js/.cjs/.ts/.mts），跳过 node_modules/.git/shared
+function ovSourceFilesUnder(dir, skipAbs, out2) {
+  out2 = out2 || [];
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return out2; }
+  for (const e of entries) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) {
+      if (e.name === 'node_modules' || e.name === '.git' || p === skipAbs) continue;
+      ovSourceFilesUnder(p, skipAbs, out2);
+      continue;
+    }
+    const dot = e.name.lastIndexOf('.');
+    if (dot > 0 && /\.(mjs|js|cjs|ts|mts)$/.test(e.name.slice(dot))) out2.push(p);
+  }
+  return out2;
+}
+
+// shared/ 目录在 lib/ 里的传递闭包（只跟随 lib 内部的 ./ 相对 import）
+function ovSharedClosure(libDir, seeds) {
+  const generated = new Set();
+  const pending = seeds.slice();
+  while (pending.length) {
+    const name = pending.pop();
+    if (generated.has(name)) continue;
+    let body = null;
+    try { body = fs.readFileSync(path.join(libDir, name), 'utf8'); } catch (_) {}
+    if (body === null) continue; // lib/ 没有 = 插件本地模块，不生成（同 sync.mjs）
+    generated.add(name);
+    for (const spec of srcImportSpecs(body)) {
+      if (spec.indexOf('./') === 0) pending.push(spec.slice(2));
+    }
+  }
+  return Array.from(generated).sort();
+}
+
+function gitSync(args, timeoutMs) {
+  return spawnSync('git', args, { encoding: 'utf8', timeout: timeoutMs || 120000, maxBuffer: 16 * 1024 * 1024 });
+}
+
+// 自愈 A：重建 @openviking/dsh-memory-plugin 的 shared/ 目录
+function healOvSharedDir(profileDir) {
+  const res = { ran: false, ok: false, healed: [], error: '', commit: '' };
+  const pluginDir = path.join(profileDir, 'node_modules', '@openviking', 'dsh-memory-plugin');
+  if (!fs.existsSync(pluginDir)) return res; // 插件本身没装，不属于本模式
+  res.ran = true;
+
+  // 从 pnpm-lock.yaml 解析锁定的 commit（git dep 的 resolution 行）。
+  // 解析不到就不盲修——用错 commit 生成的 shared/ 可能与已装版本不匹配。
+  const lockPath = path.join(profileDir, 'pnpm-lock.yaml');
+  let commit = '';
+  try {
+    const lock = fs.readFileSync(lockPath, 'utf8');
+    const m = lock.match(/@openviking\/dsh-memory-plugin@[^'"\n]*?#([0-9a-f]{40})&path:/);
+    if (m) commit = m[1];
+  } catch (_) {}
+  if (!commit) { res.error = '无法从 pnpm-lock.yaml 解析 openviking 锁定 commit'; return res; }
+  res.commit = commit;
+
+  // checkout 复用：同 commit 已取过就直接用（HEAD 校验），否则浅取一次。
+  // fetch 先按用户 git 配置走（可能配了代理），失败再试「清空代理直连」——
+  // 常见翻车：V2rayN 类代理没开但 git 全局配置还指着 127.0.0.1:10808。
+  const work = path.join(require('os').tmpdir(), 'foxai-ov-sync-' + commit.slice(0, 10));
+  const headProbe = gitSync(['-C', work, 'rev-parse', 'HEAD'], 10000);
+  if (String(headProbe.stdout || '').trim() !== commit) {
+    try { fs.rmSync(work, { recursive: true, force: true }); } catch (_) {}
+    let r = gitSync(['init', '-q', work]);
+    if (r.error || r.status !== 0) { res.error = 'git init 失败: ' + String((r.stderr || r.error || '')).trim(); return res; }
+    gitSync(['-C', work, 'remote', 'add', 'origin', 'https://github.com/volcengine/OpenViking']);
+    const fetchArgs = ['-C', work, 'fetch', '--depth', '1', '-q', 'origin', commit];
+    r = gitSync(fetchArgs, 300000);
+    if (r.error || r.status !== 0) {
+      out('    · git fetch 按用户代理配置失败，改试直连…');
+      r = gitSync(['-C', work, '-c', 'http.proxy=', '-c', 'https.proxy=',
+        '-c', 'http.https://github.com/.proxy='].concat(fetchArgs.slice(2)), 300000);
+    }
+    if (r.error || r.status !== 0) {
+      res.error = 'git fetch OpenViking@' + commit.slice(0, 7) + ' 失败: ' +
+        String((r.stderr || r.error || '')).trim().split('\n').slice(-2).join(' ');
+      return res;
+    }
+    r = gitSync(['-C', work, 'checkout', '-q', 'FETCH_HEAD']);
+    if (r.error || r.status !== 0) { res.error = 'git checkout 失败: ' + String((r.stderr || '')).trim(); return res; }
+  }
+
+  const srcPluginDir = path.join(work, 'examples', 'dsh-memory-plugin');
+  const libDir = path.join(work, 'examples', 'memory-plugin-shared', 'lib');
+  if (!fs.existsSync(srcPluginDir) || !fs.existsSync(libDir)) {
+    res.error = 'checkout 缺少 examples/dsh-memory-plugin 或 memory-plugin-shared/lib'; return res;
+  }
+
+  // seeds：插件自身代码里所有解析进 shared/ 的相对 import（含 servers/、测试）
+  const sharedDir = path.join(srcPluginDir, 'shared');
+  const seeds = [];
+  for (const file of ovSourceFilesUnder(srcPluginDir, sharedDir)) {
+    const src = fs.readFileSync(file, 'utf8');
+    for (const spec of srcImportSpecs(src)) {
+      if (spec.indexOf('.') !== 0) continue;
+      const resolved = path.resolve(path.dirname(file), spec);
+      if (resolved.indexOf(sharedDir + path.sep) !== 0) continue;
+      seeds.push(resolved.slice(sharedDir.length + 1));
+    }
+  }
+  const closure = ovSharedClosure(libDir, Array.from(new Set(seeds)).sort());
+  if (!closure.length) { res.error = '闭包为空（异常，未生成任何文件）'; return res; }
+
+  const destShared = path.join(pluginDir, 'shared');
+  const HEADER = '// GENERATED FROM examples/memory-plugin-shared/lib. DO NOT EDIT.\n';
+  fs.mkdirSync(destShared, { recursive: true });
+  for (const name of closure) {
+    const target = path.join(destShared, name);
+    const body = fs.readFileSync(path.join(libDir, name), 'utf8');
+    // 经临时文件 + rename 落盘，读者不会看到半个模块（同 sync.mjs）
+    const staging = target + '.' + process.pid + '.tmp';
+    fs.writeFileSync(staging, HEADER + body, 'utf8');
+    fs.renameSync(staging, target);
+    // 语法自检：上游 lib/ 若真有语法问题，这里拦下来而不是让 dsh 报更难懂的错
+    const chk = spawnSync(process.execPath, ['--check', target], { encoding: 'utf8', timeout: 15000 });
+    if (chk.error || chk.status !== 0) {
+      res.error = '生成后语法自检失败: ' + name;
+      return res;
+    }
+    res.healed.push(name);
+  }
+  res.ok = true;
+  return res;
+}
+
+// 自愈 B：为「loader entry 用真实包名、目录却按依赖键装」的包补 symlink
+function healBundleNameMismatch(profileDir, errText) {
+  const res = { ran: false, ok: false, healed: [], error: '' };
+  const missing = [];
+  const re = /Cannot find package '([^']+)' imported from/g;
+  let m; while ((m = re.exec(errText))) missing.push(m[1]);
+  if (!missing.length) return res;
+  res.ran = true;
+
+  const nm = path.join(profileDir, 'node_modules');
+  if (!fs.existsSync(nm)) { res.error = 'node_modules 不存在'; return res; }
+
+  // name → 安装目录 的倒排索引（只扫 scope 一层 + 包一层，读 package.json 的 name）
+  const byName = {};
+  let scopes;
+  try { scopes = fs.readdirSync(nm, { withFileTypes: true }); } catch (e) { res.error = String((e && e.message) || e); return res; }
+  for (const e of scopes) {
+    if (!e.isDirectory() || e.name.indexOf('.') === 0) continue;
+    if (e.name.indexOf('@') === 0) {
+      let subs; try { subs = fs.readdirSync(path.join(nm, e.name), { withFileTypes: true }); } catch (_) { continue; }
+      for (const s of subs) {
+        if (!s.isDirectory() || s.name.indexOf('.') === 0) continue;
+        try {
+          const pj = JSON.parse(fs.readFileSync(path.join(nm, e.name, s.name, 'package.json'), 'utf8'));
+          if (pj.name && !byName[pj.name]) byName[pj.name] = path.join(nm, e.name, s.name);
+        } catch (_) {}
+      }
+    } else {
+      try {
+        const pj = JSON.parse(fs.readFileSync(path.join(nm, e.name, 'package.json'), 'utf8'));
+        if (pj.name && !byName[pj.name]) byName[pj.name] = path.join(nm, e.name);
+      } catch (_) {}
+    }
+  }
+
+  for (const name of Array.from(new Set(missing))) {
+    const linkPath = path.join(nm, name);
+    if (fs.existsSync(linkPath)) continue; // 已能解析，不动
+    const target = byName[name];
+    if (!target) continue; // node_modules 里确实没有此名：真缺失，交给 auto-disable/用户
+    try {
+      fs.mkdirSync(path.dirname(linkPath), { recursive: true });
+      // Windows 无开发者模式时 symlink 需要管理员权限，junction 不需要（但只接受绝对路径）
+      if (IS_WIN) fs.symlinkSync(target, linkPath, 'junction');
+      else fs.symlinkSync(path.relative(path.dirname(linkPath), target), linkPath);
+      res.healed.push({ link: name, target: path.relative(nm, target) });
+    } catch (e) {
+      res.error = '建 symlink 失败 ' + name + ': ' + String((e && e.message) || e);
+      return res;
+    }
+  }
+  res.ok = !res.error;
+  return res;
+}
+
+// 自愈编排：按 stderr 特征触发 A/B；治好任意一项且无失败即视为成功（调用方会重启 dsh web 复核）
+function trySelfHealDshPlugins(errText) {
+  const result = { tried: false, ok: false, error: '', healed: [] };
+  const profileDir = dshProfileDir();
+  if (!fs.existsSync(profileDir)) return result;
+  const steps = [];
+
+  // A：报错点名 dsh-memory-plugin 且缺的是 shared/ 下的模块
+  if (/dsh-memory-plugin/.test(errText) && /shared\/[A-Za-z0-9._-]+\.mjs/.test(errText)) {
+    const r = healOvSharedDir(profileDir);
+    if (r.ran) {
+      result.tried = true;
+      steps.push(r);
+      if (r.healed.length) out('    🔧 自愈: 重建 @openviking/dsh-memory-plugin/shared/（' + r.healed.length + ' 个模块，commit ' + r.commit.slice(0, 7) + '）');
+      if (!r.ok) { result.error = result.error || ('openviking shared/: ' + r.error); out('    ✗ 自愈 openviking shared/ 失败: ' + r.error); }
+    }
+  }
+
+  // B：Cannot find package '<名>' imported from <profile root>
+  const r2 = healBundleNameMismatch(profileDir, errText);
+  if (r2.ran) {
+    result.tried = true;
+    steps.push(r2);
+    for (const h of r2.healed) out('    🔧 自愈: node_modules/' + h.link + ' -> ' + h.target + '（loader 名不匹配）');
+    if (!r2.ok) { result.error = result.error || ('bundle 名不匹配: ' + r2.error); out('    ✗ 自愈 bundle 名不匹配失败: ' + r2.error); }
+  }
+
+  for (const s of steps) for (const h of s.healed) result.healed.push(h.file || h.link || h);
+  result.ok = result.tried && result.healed.length > 0 && !result.error;
+  return result;
+}
+
+function tryAutoDisableBrokenDshBundles(errText) {
+  const result = { tried: true, ok: false, error: '', detected: [], disabled: [], backup: '', profile: '' };
+  const profileDir = (process.env.DSH_PROFILE_DIR && process.env.DSH_PROFILE_DIR.trim()) ||
+    path.join(homeDir(), '.dsh', 'profiles', 'web');
+  const pkgPath = path.join(profileDir, 'package.json');
+  result.profile = pkgPath;
+  if (!fs.existsSync(pkgPath)) {
+    result.error = 'profile package.json 不存在: ' + pkgPath;
+    out('    · 自动禁用跳过: ' + result.error);
+    return result;
+  }
+  let pkg;
+  try { pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')); }
+  catch (e) { result.error = 'package.json 解析失败: ' + String((e && e.message) || e); return result; }
+  const bundles = pkg && pkg.dsh && pkg.dsh.profile && pkg.dsh.profile.bundles;
+  if (!Array.isArray(bundles)) {
+    result.error = 'package.json 缺少 dsh.profile.bundles 数组';
+    return result;
+  }
+  const broken = detectBrokenDshBundles(errText, bundles);
+  result.detected = broken;
+  if (broken.length === 0) {
+    result.ok = true; // 探测正常完成,只是没匹配
+    result.error = 'no-match';
+    out('    · 自动禁用: stderr 未指向 bundles 里的任何条目,跳过修改');
+    return result;
+  }
+  const fix = disableBrokenDshBundlesInProfile(broken);
+  if (!fix.ok) {
+    result.error = fix.error || 'unknown';
+    return result;
+  }
+  result.ok = true;
+  result.disabled = fix.disabled;
+  result.backup = fix.backup_path;
+  out('    🔧 检测到 ' + broken.length + ' 个损坏 bundle,已从 bundles 移除:');
+  for (const b of fix.disabled) out('       - ' + b);
+  out('         备份: ' + fix.backup_path);
+  out('         恢复: cp "' + fix.backup_path + '" "' + pkgPath + '"');
+  return result;
+}
+
+function launchDshWebAndWait(allowAutoDisable) {
+  // allowAutoDisable 默认 true;在自动禁用失败后递归重试时传 false 避免死循环
+  if (allowAutoDisable === undefined) allowAutoDisable = true;
+
   const r = launchDshWeb();
   if (!r.ok) {
     out('    ✗ 启动失败: ' + (r.error || 'unknown'));
@@ -504,7 +966,56 @@ function launchDshWebAndWait() {
   out('    · 已 spawn (pid ' + r.pid + ')，等待端口 bind（最多 60s，npx 首次下载依赖可能较慢）…');
   const bound = waitForBind(DSH_WEB_HOST.host, DSH_WEB_HOST.port, 60000);
   if (!bound) {
-    out('    ! 60s 内端口未 bind；npx 可能仍在下载依赖，稍后手动访问 ' + DSH_WEB_URL + ' 确认');
+    // dump 子进程 stderr/stdout 给用户看;再判断子进程是否已退出,给出可操作建议。
+    const alive = isProcessAlive(r.pid);
+    const errText = readLogTail(r.err_log, 4096);
+    const outText = readLogTail(r.out_log, 2048);
+    out('    ! 60s 内端口未 bind' + (alive ? '' : '（子进程 pid ' + r.pid + ' 已退出）'));
+    out('    [DEBUG] pid=' + r.pid + ' alive=' + alive + ' errLen=' + (errText||'').length + ' pattern=' + /failed to (?:apply|import) loader entry|Cannot find (?:module|package)/i.test(errText||''));
+    if (errText) {
+      out('    --- dsh web stderr (尾部) ---');
+      out(indentLines(errText, '    '));
+    }
+    if (outText) {
+      out('    --- dsh web stdout (尾部) ---');
+      out(indentLines(outText, '    '));
+    }
+    // 先自愈（重建 openviking shared/、修 loader 名不匹配 symlink）——治得好
+    // 就不用禁用插件砍功能；自愈没改动任何文件或失败才走 auto-disable。
+    // 递归重试时 allowAutoDisable=false，两个分支都不会再触发，无死循环。
+    if (AUTO_DISABLE_DSH_BROKEN && allowAutoDisable && !alive &&
+        /failed to (?:apply|import) loader entry|Cannot find (?:module|package)/i.test(errText)) {
+      const heal = trySelfHealDshPlugins(errText);
+      if (heal.tried && heal.ok) {
+        const retried = launchDshWebAndWait(false);
+        return Object.assign({ bound: false, self_healed: heal }, retried);
+      }
+      // 自动禁用损坏 bundle（仅在 enabled 时 + 子进程已退出 + stderr 含 loader 失败信号）
+      const fix = tryAutoDisableBrokenDshBundles(errText);
+      if (fix && fix.tried && fix.ok) {
+        // 重试一次（不允许再触发 auto-disable，避免不同插件连环触发导致无限循环）
+        const retried = launchDshWebAndWait(false);
+        return Object.assign({ bound: false, auto_disabled: fix }, retried);
+      } else if (fix && fix.tried) {
+        out('    ✗ 自动禁用失败: ' + (fix.error || 'unknown'));
+        if (!/ERR_MODULE_NOT_FOUND|Cannot find (module|package)|failed to import loader entry|loader entries failed to apply/i.test(errText)) {
+          out('       stderr 未识别为插件加载失败,改用通用建议:');
+        }
+      }
+    }
+    if (/ERR_MODULE_NOT_FOUND|Cannot find (module|package)|failed to import loader entry|loader entries failed to apply/i.test(errText)) {
+      out('    💡 看起来是 ~/.dsh/profiles/web 下插件加载失败（模块缺失/损坏）');
+      out('       修复: cd ~/.dsh/profiles/web && pnpm install');
+      out('       或在该目录跑 npm update 把所有 plugin 升到最新兼容版本');
+      if (!AUTO_DISABLE_DSH_BROKEN) {
+        out('       或加 --auto-disable-dsh-plugins 让脚本自动从 bundles 移除损坏条目（备份原文件）');
+      }
+    } else if (!alive) {
+      out('    💡 子进程已退出但 stderr 里没识别到常见错误模式；可手动跑同样的命令查看完整日志:');
+      out('       ' + r.argv.join(' '));
+    } else {
+      out('    进程仍在跑但端口未 bind（npx 可能在下载依赖），稍后手动访问 ' + DSH_WEB_URL + ' 确认');
+    }
     return Object.assign({ bound: false }, r);
   }
   out('    ✓ 已就绪: ' + DSH_WEB_URL);
@@ -518,6 +1029,28 @@ function launchDshWebAndWait() {
   }
   if (!stable) {
     out('    ! 进程在就绪后 ~15s 内退出——通常是 ~/.dsh/profiles/web 下的插件与当前 dsh 不兼容');
+    // dump stderr 让用户看到具体哪个插件挂了
+    const errText2 = readLogTail(r.err_log, 4096);
+    if (errText2) {
+      out('    --- dsh web stderr (尾部) ---');
+      out(indentLines(errText2, '    '));
+    }
+    // 同样的「先自愈、后禁用」流程（端口先 bind 后立刻退出 = 子进程仍可读到 stderr）
+    if (AUTO_DISABLE_DSH_BROKEN && allowAutoDisable && errText2 &&
+        /failed to (?:apply|import) loader entry|Cannot find (?:module|package)/i.test(errText2)) {
+      const heal = trySelfHealDshPlugins(errText2);
+      if (heal.tried && heal.ok) {
+        const retried = launchDshWebAndWait(false);
+        return Object.assign({ bound: true, stable: false, self_healed: heal }, retried);
+      }
+      const fix = tryAutoDisableBrokenDshBundles(errText2);
+      if (fix && fix.tried && fix.ok) {
+        const retried = launchDshWebAndWait(false);
+        return Object.assign({ bound: true, stable: false, auto_disabled: fix }, retried);
+      } else if (fix && fix.tried) {
+        out('    ✗ 自动禁用失败: ' + (fix.error || 'unknown'));
+      }
+    }
     const pin = dshPin();
     if (pin) {
       out('      本脚本已锁定兼容版本 ' + pin + '；若仍失败可在该 profile 目录执行 npm update 升级插件后重试');
@@ -734,6 +1267,49 @@ function main() {
   const RESTORE_APPS = new Set(['claude', 'codex']);
 
   for (const t of filteredTools) {
+    // ensure-only 工具（herdr 等 brew 渠道）：只保证「装没装」，跳过下面整套
+    // npm registry 比对/升级逻辑。已装 → ok；未装且有 brew → brew install；
+    // 未装且无 brew → unknown（给出手动指引）。--check 模式只报告不动手。
+    if (t.ensureOnly === 'brew') {
+      let status = '', action = '', verFrom = '-', verTo = '-', err = '';
+      const bp = binProbe(t.bin);
+      if (bp.exists) {
+        // `herdr --version` 首行是 "herdr 0.8.2"（带二进制名前缀），剥掉只留版本号
+        const ver = (bp.version || '').replace(new RegExp('^' + t.bin + '\\s+'), '') || bp.version || '-';
+        status = 'ok'; verFrom = ver;
+        action = '已安装' + (ver !== '-' ? ' ' + ver : '') + '（仅确保安装，不监测升级）';
+      } else {
+        const brewOk = (function () {
+          const r = run('brew', ['--version'], 15000);
+          return !r.error && r.status === 0;
+        })();
+        if (!brewOk) {
+          status = 'unknown';
+          action = '未安装且本机无 Homebrew；请先安装 brew 再跑本脚本，或手动安装 ' + t.id;
+        } else if (CHECK_ONLY) {
+          status = 'installable';
+          action = '未安装，将执行 brew install ' + t.id;
+        } else {
+          out('  … 正在安装 ' + t.name + ' (brew install ' + t.id + ')');
+          const res = run('brew', ['install', t.id], 600000);
+          if (!res.error && res.status === 0) {
+            const bp2 = binProbe(t.bin);
+            status = 'installed'; verTo = bp2.exists ? (bp2.version || '-') : '-';
+            action = '已安装' + (verTo !== '-' ? ' ' + verTo : '');
+          } else {
+            status = 'error'; action = 'brew install 失败';
+            err = sanitize(String(res.error ? res.error.message : (res.stderr || res.stdout || '')).trim().split('\n').slice(-2).join(' '));
+          }
+        }
+      }
+      bump(status);
+      const icon0 = { ok: '✓', installable: '!', installed: '↑', unknown: '?' }[status] || '✗';
+      out([t.id.padEnd(9), (icon0 + ' ' + status).padEnd(13), String(verFrom).padEnd(11), String(verTo).padEnd(11), action].join(''));
+      if (err) out('          错误详情: ' + err);
+      results.push({ id: t.id, name: t.name, status: status, installed: verFrom, latest: verTo, action: action, error: sanitize(err) });
+      continue;
+    }
+
     const cur = installedVersion(t.pkg);
     const lat = latestVersion(t.pkg);
     // 目标版本：有 pin（兼容性锁，见 TOOLS 注册表注释）用 pin，否则 registry

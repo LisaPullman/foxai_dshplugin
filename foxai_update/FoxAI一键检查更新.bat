@@ -12,7 +12,7 @@ rem =============================================================
 chcp 65001 >nul
 cd /d "%~dp0"
 
-node scripts\update-cli-tools.js --restart-dsh-web
+node scripts\update-cli-tools.js --restart-dsh-web --auto-disable-dsh-plugins
 set RC=%ERRORLEVEL%
 
 echo.

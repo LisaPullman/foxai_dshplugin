@@ -17,7 +17,7 @@
 # 双击打开时工作目录可能是 HOME，先回到脚本所在目录
 cd "$(dirname "$0")" || exit 1
 
-bash -c 'exec node scripts/update-cli-tools.js --restart-dsh-web'
+bash -c 'exec node scripts/update-cli-tools.js --restart-dsh-web --auto-disable-dsh-plugins'
 rc=$?
 
 echo ""

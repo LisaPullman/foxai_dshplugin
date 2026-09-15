@@ -18,7 +18,7 @@
 
 cd "$(dirname "$0")" || exit 1
 
-node scripts/update-cli-tools.js --restart-dsh-web
+node scripts/update-cli-tools.js --restart-dsh-web --auto-disable-dsh-plugins
 rc=$?
 
 echo ""
