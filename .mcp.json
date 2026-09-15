@@ -1,21 +1,5 @@
 {
   "mcpServers": {
-    "foxaippt": {
-      "type": "stdio",
-      "command": "node",
-      "args": [
-        "/Users/foxai/Desktop/dshplugin/foxaippt_claude/index.js"
-      ],
-      "env": {}
-    },
-    "foxai-vigener": {
-      "type": "stdio",
-      "command": "node",
-      "args": [
-        "/Users/foxai/Desktop/dshplugin/foxai_vigener/index.js"
-      ],
-      "env": {}
-    },
     "foxai-gpt-image-2": {
       "type": "stdio",
       "command": "node",
