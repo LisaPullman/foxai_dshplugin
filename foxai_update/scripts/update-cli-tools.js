@@ -62,7 +62,14 @@ const TOOLS = [
   { id: 'gemini',   name: 'Gemini CLI',  pkg: '@google/gemini-cli',             bin: 'gemini' },
   { id: 'opencode', name: 'OpenCode',    pkg: 'opencode-ai',                    bin: 'opencode' },
   { id: 'pi',       name: 'Pi',          pkg: '@earendil-works/pi-coding-agent', bin: 'pi' },
-  { id: 'grok',     name: 'Grok CLI',    pkg: '@xai-official/grok',             bin: 'grok' },
+  // grok 的 postinstall 负责从 per-platform optional dep（@xai-official/grok-<plat>-<arch>）
+  // 解压 native 二进制到 bin/grok-native（141MB Mach-O）。npm 11+ 默认开启 allow-scripts
+  // 安全策略：未在白名单的 install scripts 会被静默跳过——不传 --allow-scripts，postinstall
+  // 不跑，CLI 启动会找不到 native（解到一半就退出会留下损坏的二进制，更难排查）。
+  // 这里列白名单后，install 调用会自动追加 --allow-scripts=<pkg>（buildInstallArgs）；
+  // 装完后探测 nativeBin 是否就位，未就位则自动重试一次（捕获「白名单生效但仍失败」）。
+  { id: 'grok',     name: 'Grok CLI',    pkg: '@xai-official/grok',             bin: 'grok',
+    allowScripts: ['@xai-official/grok'], nativeBin: 'bin/grok-native' },
   { id: 'dsh',      name: 'DeepSeek Harness', pkg: '@deepseek-ai/dsh',           bin: 'dsh',
     // 兼容性锁：0.1.2-rc.1 移除了 @deepseek-ai/dsh-settings 的 settingsNamespace
     // 导出，~/.dsh/profiles/web 的插件生态（@linxin666/dsh-web-ui-all@0.3.6 的
@@ -120,6 +127,19 @@ function run(cmd, args, timeoutMs) {
 }
 
 function npm(args, timeoutMs) { return run('npm', args, timeoutMs); }
+
+// 探测 npm 主版本号（缓存到进程级）。--allow-scripts 是 npm 11+ 才有的 flag，
+// npm 10/9 传过去会被当成未知选项拒绝 install。buildInstallArgs 据此守卫：
+// < 11 时不带 --allow-scripts=...（保持旧行为，避免兼容性问题）。
+let _npmMajorCache = null;
+function npmMajor() {
+  if (_npmMajorCache !== null) return _npmMajorCache;
+  const res = npm(['--version'], 5000);
+  if (res.error || res.status !== 0) { _npmMajorCache = 0; return 0; }
+  const m = String(res.stdout || '').trim().match(/^(\d+)/);
+  _npmMajorCache = m ? parseInt(m[1], 10) : 0;
+  return _npmMajorCache;
+}
 
 // ---------- 前置检查 ----------
 function NPM_ROOT_OF() {
@@ -647,6 +667,30 @@ function eaccHint(pkgName) {
   return '全局 npm 目录无写权限(EACCES)。方案A: sudo npm install -g ' + pkgName + '@latest；方案B(推荐): npm config set prefix ~/.npm-global 并把 ~/.npm-global/bin 加入 PATH';
 }
 
+// 构造 `npm install -g <pkg>@<ver>` 调用参数；allowScripts 非空且 npmMajor() >= 11
+// 时附带 --allow-scripts=<pkg>（逗号分隔；npm 11.19 实证接受重复 flag 也接受逗号
+// 合并值，这里走合并值更紧凑）。npm 10/9 没有这个 flag，传过去会被当成未知
+// 选项拒绝 install，所以严格守卫主版本号。
+function buildInstallArgs(pkgSpec, allowScripts) {
+  const args = ['install', '-g', '--no-fund', '--no-audit'];
+  if (Array.isArray(allowScripts) && allowScripts.length > 0 && npmMajor() >= 11) {
+    args.push('--allow-scripts=' + allowScripts.join(','));
+  }
+  args.push(pkgSpec);
+  return args;
+}
+
+// native binary 探测：返回 <NPM_ROOT>/<pkg>/<nativeBin> 的绝对路径。
+// 仅在工具条目声明了 nativeBin 时调用（当前仅 grok 用到 bin/grok-native）。
+// 用于捕获 npm 11 默认跳过 install scripts 但 npm 退出码仍为 0 的「假成功」——
+// 调用方拿到路径后 fs.existsSync 决定是否重试一次。
+function nativeBinPath(tool) {
+  if (!tool || !tool.nativeBin) return '';
+  try {
+    return path.join.apply(null, [NPM_ROOT].concat(tool.pkg.split('/'), tool.nativeBin.split('/')));
+  } catch (_) { return ''; }
+}
+
 // ---------- 主流程 ----------
 function main() {
   if (!NPM_ROOT) {
@@ -717,14 +761,26 @@ function main() {
         action = '未安装，将安装 ' + target;
       } else {
         out('  … 正在安装 ' + t.name + ' (' + t.pkg + '@' + target + ')');
-        const res = npm(['install', '-g', '--no-fund', '--no-audit', t.pkg + '@' + target], 600000);
-        if (!res.error && res.status === 0) {
+        const res = npm(buildInstallArgs(t.pkg + '@' + target, t.allowScripts), 600000);
+        // native binary 自愈：npm 11+ allow-scripts 默认拦截未在白名单的 install scripts，
+        // 静默跳过 postinstall 但 npm 退出码仍为 0 — 装完看不到 native binary 即失败。
+        // 重试一次（同样的 buildInstallArgs 已带 --allow-scripts=...，等 npm 配置生效）。
+        const nbPath = nativeBinPath(t);
+        const nativeMissing = !!(nbPath && !fs.existsSync(nbPath));
+        let final = res;
+        let retried = false;
+        if (nativeMissing && res.status === 0 && !res.error) {
+          out('    ! native binary 未落盘（' + nbPath + '），postinstall 可能被拦截，重试一次');
+          final = npm(buildInstallArgs(t.pkg + '@' + target, t.allowScripts), 600000);
+          retried = true;
+        }
+        if (!final.error && final.status === 0) {
           status = 'installed'; verFrom = '-'; verTo = installedVersion(t.pkg) || target;
-          action = '已安装 ' + verTo;
+          action = '已安装 ' + verTo + (retried ? '（含 native binary 自愈重试）' : '');
           if (RESTORE_APPS.has(t.id)) envRestoreApps.add(t.id);
         } else {
           status = 'error'; action = '安装失败';
-          err = extractErr(res, t);
+          err = extractErr(final, t, { nativeMissing: retried || nativeMissing });
         }
       }
     } else if (cur === target) {
@@ -744,14 +800,24 @@ function main() {
     } else {
       const down = !!(t.pin && verCmp(cur, target) > 0);
       out('  … 正在' + (down ? '回退 ' : '升级 ') + t.name + ' ' + cur + ' → ' + target);
-      const res = npm(['install', '-g', '--no-fund', '--no-audit', t.pkg + '@' + target], 600000);
-      if (!res.error && res.status === 0) {
+      const res = npm(buildInstallArgs(t.pkg + '@' + target, t.allowScripts), 600000);
+      // 同 install 分支:native binary 自愈重试,捕获 npm 11 allow-scripts 静默跳过 postinstall。
+      const nbPath2 = nativeBinPath(t);
+      const nativeMissing2 = !!(nbPath2 && !fs.existsSync(nbPath2));
+      let final2 = res;
+      let retried2 = false;
+      if (nativeMissing2 && res.status === 0 && !res.error) {
+        out('    ! native binary 未落盘（' + nbPath2 + '），postinstall 可能被拦截，重试一次');
+        final2 = npm(buildInstallArgs(t.pkg + '@' + target, t.allowScripts), 600000);
+        retried2 = true;
+      }
+      if (!final2.error && final2.status === 0) {
         status = 'upgraded'; verTo = installedVersion(t.pkg) || target;
-        action = (down ? '已回退 ' : '已升级 ') + cur + ' → ' + verTo;
+        action = (down ? '已回退 ' : '已升级 ') + cur + ' → ' + verTo + (retried2 ? '（含 native binary 自愈重试）' : '');
         if (RESTORE_APPS.has(t.id)) envRestoreApps.add(t.id);
       } else {
         status = 'error'; action = (down ? '回退失败' : '升级失败') + '（仍为 ' + cur + '）';
-        err = extractErr(res, t);
+        err = extractErr(final2, t, { nativeMissing: retried2 || nativeMissing2 });
       }
     }
 
@@ -935,14 +1001,27 @@ function main() {
   process.exit((summary.error || 0) > 0 ? 1 : 0);
 }
 
-function extractErr(res, t) {
+function extractErr(res, t, opts) {
+  opts = opts || {};
   if (res.error) {
     if (res.error.code === 'ETIMEDOUT') return '执行超时';
     return res.error.message || String(res.error);
   }
   const tail = String(res.stderr || res.stdout || '').trim().split('\n').slice(-3).join(' ');
-  if (/EACCES|permission denied/i.test(tail)) return eaccHint(t.pkg) + ' | ' + tail;
-  return tail || ('npm 退出码 ' + res.status);
+  let base;
+  if (/EACCES|permission denied/i.test(tail)) base = eaccHint(t.pkg) + ' | ' + tail;
+  else base = tail || ('npm 退出码 ' + res.status);
+
+  // 仅对声明了 allowScripts/nativeBin 的工具:装了但 native binary 没落盘,
+  // 大概率是 npm 11+ allow-scripts 安全门把 postinstall 拒了。给出两条路:
+  // (a) 一次性 npm config set (永久白名单) (b) 手动 npm install 时显式带 flag。
+  if (opts.nativeMissing && t && t.allowScripts && t.allowScripts.length > 0) {
+    const list = t.allowScripts.join(',');
+    base += ' | npm 11+ allow-scripts 默认拒绝未在白名单的 install scripts；请运行: ' +
+      'npm config set allow-scripts=' + list + ' --location=user ' +
+      '或在 npm install -g 时显式附带 --allow-scripts=' + list;
+  }
+  return base;
 }
 
 main();

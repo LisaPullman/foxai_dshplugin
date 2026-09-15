@@ -49,6 +49,10 @@ FoxAI一键检查更新.bat         └─ Web 结果卡片（plugin/client.js�
 
 全自动：检查 → 缺失的安装 → 落后的升级 → 显示汇总表 → 按回车关闭。可把入口文件做替身放到桌面/Dock。
 
+#### 1.1) npm 11+ allow-scripts 说明（仅影响 grok）
+
+grok CLI（`@xai-official/grok`）的 `postinstall` 会从 `@xai-official/grok-<plat>-<arch>` 解压 141MB 的 native binary `bin/grok-native`，跳过它 `grok` 命令直接不可用。npm 11 引入了 `allow-scripts` 安全门——不在白名单的 install scripts 会被静默跳过。本插件对 grok 的安装/升级会自动附带 `--allow-scripts=@xai-official/grok` 并在事后探测 native binary 是否落盘，缺失则自动重试一次。如果你手动跑 `npm install -g @xai-official/grok@<ver>`，需要自行附带该 flag，或一次性加入 npm 配置：`npm config set allow-scripts=@xai-official/grok --location=user`。
+
 ### 2) 核心脚本直接调用
 
 ```bash
