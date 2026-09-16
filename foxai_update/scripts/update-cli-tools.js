@@ -113,11 +113,12 @@ const RESTART_DSH_WEB = process.argv.indexOf('--restart-dsh-web') !== -1;
 // 自动从 ~/.dsh/profiles/web/package.json 的 dsh.profile.bundles 移除 dsh web 启动失败时
 // 报错的插件条目(常见: GitHub 源 prepack 没跑导致 shared/ 缺失、插件作者把 loader name
 // 写成了跟 bundle 名字不一样的形式)。操作前会备份原文件(.bak.<ts>),只移除 stderr
-// 中明确提到的 bundle,避免误伤其它正常插件。一键脚本默认开启;core 调用方可用
-// --no-auto-disable-dsh-plugins 关掉。
+// 中明确提到的 bundle,避免误伤其它正常插件;且仅在自愈(symlink/shared 重建)治不好时
+// 才执行。默认开启——一键脚本、核心脚本直跑、DSH 插件路径行为一致;不想要的调用方
+// 显式传 --no-auto-disable-dsh-plugins 关掉。
 const AUTO_DISABLE_DSH_BROKEN = (function () {
   if (process.argv.indexOf('--no-auto-disable-dsh-plugins') !== -1) return false;
-  return process.argv.indexOf('--auto-disable-dsh-plugins') !== -1;
+  return true; // --auto-disable-dsh-plugins 旧 flag 保留兼容,现为默认行为
 })();
 const DSH_WEB_URL = process.env.DSH_WEB_URL || 'http://127.0.0.1:3080';
 const DSH_WEB_HOST = (function () {
@@ -315,8 +316,31 @@ function lookupOwnerPid(port) {
 }
 
 function isProcessAlive(pid) {
-  try { process.kill(pid, 0); return true; }
+  try { process.kill(pid, 0); }
   catch (e) { return false; }
+  // kill(pid,0) 对僵尸进程同样返回成功。本脚本等待端口 bind 期间同步阻塞事件
+  // 循环（tcp-probe 子进程轮询），libuv 收不到 SIGCHLD、不会 reap 已退出的 dsh
+  // 子进程——崩溃的子进程会以 Z 状态一直挂到父进程退出为止。不识别僵尸会把
+  // 「已崩溃」误判为「还活着」，alive 门禁进而挡住自愈/自动禁用，dsh web 永远
+  // 起不来（实测：spawn 后 3s 崩溃，60s 后 kill(pid,0) 仍成功、ps 显示 <defunct>）。
+  if (IS_WIN) return true; // Windows 没有僵尸状态
+  try {
+    let stat = '';
+    if (fs.existsSync('/proc/' + pid + '/stat')) {
+      // Linux: 格式 "pid (comm) state ..."，comm 可含空格/括号，取最后 ')' 之后
+      const s = fs.readFileSync('/proc/' + pid + '/stat', 'utf8');
+      const idx = s.lastIndexOf(')');
+      if (idx !== -1) stat = s.slice(idx + 1).trim();
+    } else {
+      // macOS 等 BSD：ps 的 stat 列首字母即进程状态
+      const r = spawnSync('ps', ['-p', String(pid), '-o', 'stat='], {
+        encoding: 'utf8', shell: false, timeout: 2000,
+      });
+      if (!r.error && r.status === 0) stat = String(r.stdout || '').trim();
+    }
+    if (stat && stat[0] === 'Z') return false; // zombie = 已退出，只是没被 wait
+  } catch (_) {}
+  return true;
 }
 
 // SIGTERM -> 等 graceMs -> SIGKILL;返回最终状态
@@ -745,12 +769,16 @@ function healOvSharedDir(profileDir) {
   res.ran = true;
 
   // 从 pnpm-lock.yaml 解析锁定的 commit（git dep 的 resolution 行）。
-  // 解析不到就不盲修——用错 commit 生成的 shared/ 可能与已装版本不匹配。
+  // 两种格式都要认：pnpm-lock v9 的 packages 条目把 tarball URL 与插件名写在同一行
+  //   '@openviking/dsh-memory-plugin@https://codeload.github.com/volcengine/OpenViking/tar.gz/<sha>#path:/examples/dsh-memory-plugin':
+  // 旧格式则是 `#<sha>&path:` 查询参数形态。解析不到就不盲修——用错 commit 生成的
+  // shared/ 可能与已装版本不匹配。
   const lockPath = path.join(profileDir, 'pnpm-lock.yaml');
   let commit = '';
   try {
     const lock = fs.readFileSync(lockPath, 'utf8');
-    const m = lock.match(/@openviking\/dsh-memory-plugin@[^'"\n]*?#([0-9a-f]{40})&path:/);
+    const m = lock.match(/@openviking\/dsh-memory-plugin@[^\n]*?\/tar\.gz\/([0-9a-f]{40})[^\n]*#path:/) ||
+              lock.match(/@openviking\/dsh-memory-plugin@[^'"\n]*?#([0-9a-f]{40})&path:/);
     if (m) commit = m[1];
   } catch (_) {}
   if (!commit) { res.error = '无法从 pnpm-lock.yaml 解析 openviking 锁定 commit'; return res; }
@@ -837,16 +865,19 @@ function healBundleNameMismatch(profileDir, errText) {
   const nm = path.join(profileDir, 'node_modules');
   if (!fs.existsSync(nm)) { res.error = 'node_modules 不存在'; return res; }
 
-  // name → 安装目录 的倒排索引（只扫 scope 一层 + 包一层，读 package.json 的 name）
+  // name → 安装目录 的倒排索引（只扫 scope 一层 + 包一层，读 package.json 的 name）。
+  // 目录判定同时接受符号链接：pnpm 布局下 node_modules 顶层全是 symlink，Dirent
+  // 的 isDirectory() 对其返回 false，只认真目录会扫不到任何包（readFileSync 会
+  // 自动跟随 symlink，坏链接在 try/catch 里跳过）。
   const byName = {};
   let scopes;
   try { scopes = fs.readdirSync(nm, { withFileTypes: true }); } catch (e) { res.error = String((e && e.message) || e); return res; }
   for (const e of scopes) {
-    if (!e.isDirectory() || e.name.indexOf('.') === 0) continue;
+    if (!(e.isDirectory() || e.isSymbolicLink()) || e.name.indexOf('.') === 0) continue;
     if (e.name.indexOf('@') === 0) {
       let subs; try { subs = fs.readdirSync(path.join(nm, e.name), { withFileTypes: true }); } catch (_) { continue; }
       for (const s of subs) {
-        if (!s.isDirectory() || s.name.indexOf('.') === 0) continue;
+        if (!(s.isDirectory() || s.isSymbolicLink()) || s.name.indexOf('.') === 0) continue;
         try {
           const pj = JSON.parse(fs.readFileSync(path.join(nm, e.name, s.name, 'package.json'), 'utf8'));
           if (pj.name && !byName[pj.name]) byName[pj.name] = path.join(nm, e.name, s.name);
@@ -908,7 +939,10 @@ function trySelfHealDshPlugins(errText) {
   }
 
   for (const s of steps) for (const h of s.healed) result.healed.push(h.file || h.link || h);
-  result.ok = result.tried && result.healed.length > 0 && !result.error;
+  // 只要治好任意一项就视为可重试（error 保留为信息性）：多插件同时损坏时经常
+  // B 治好 symlink 而 A 因网络失败——此时直接放弃会把本可保留的插件也禁用掉。
+  // 重启复核后仍然坏的条目由下一轮（rounds 预算内）的 heal/auto-disable 接手。
+  result.ok = result.tried && result.healed.length > 0;
   return result;
 }
 
@@ -954,9 +988,11 @@ function tryAutoDisableBrokenDshBundles(errText) {
   return result;
 }
 
-function launchDshWebAndWait(allowAutoDisable) {
-  // allowAutoDisable 默认 true;在自动禁用失败后递归重试时传 false 避免死循环
-  if (allowAutoDisable === undefined) allowAutoDisable = true;
+function launchDshWebAndWait(rounds) {
+  // rounds = 剩余「自愈/自动禁用 + 重启复核」轮次预算，默认 3；每重试一轮消耗 1，
+  // 归零后不再触发自愈/禁用——天然防死循环。多个插件连环损坏时（实测 maid-atelier
+  // 名字不匹配 + openviking shared/ 缺失同时出现）单轮治不完，需要逐轮消解。
+  if (rounds === undefined) rounds = 3;
 
   const r = launchDshWeb();
   if (!r.ok) {
@@ -967,11 +1003,16 @@ function launchDshWebAndWait(allowAutoDisable) {
   const bound = waitForBind(DSH_WEB_HOST.host, DSH_WEB_HOST.port, 60000);
   if (!bound) {
     // dump 子进程 stderr/stdout 给用户看;再判断子进程是否已退出,给出可操作建议。
+    // 匹配/自愈用全文（errFull）: 多插件损坏时错误按加载顺序全部打出,取尾部会
+    // 把排在前面的报错截掉（实测 maid-atelier 的报错排在 openviking 前面,
+    // tail 4KB 只剩 openviking,导致 symlink 自愈与 bundle 检测全部漏检）。
+    // 展示仍用尾部 4KB 控制输出量。
     const alive = isProcessAlive(r.pid);
-    const errText = readLogTail(r.err_log, 4096);
+    const errFull = readLogTail(r.err_log, 256 * 1024);
+    const errText = errFull.slice(-4096);
     const outText = readLogTail(r.out_log, 2048);
     out('    ! 60s 内端口未 bind' + (alive ? '' : '（子进程 pid ' + r.pid + ' 已退出）'));
-    out('    [DEBUG] pid=' + r.pid + ' alive=' + alive + ' errLen=' + (errText||'').length + ' pattern=' + /failed to (?:apply|import) loader entry|Cannot find (?:module|package)/i.test(errText||''));
+    out('    [DEBUG] pid=' + r.pid + ' alive=' + alive + ' errLen=' + errFull.length + ' pattern=' + /failed to (?:apply|import) loader entry|Cannot find (?:module|package)/i.test(errFull));
     if (errText) {
       out('    --- dsh web stderr (尾部) ---');
       out(indentLines(errText, '    '));
@@ -982,28 +1023,27 @@ function launchDshWebAndWait(allowAutoDisable) {
     }
     // 先自愈（重建 openviking shared/、修 loader 名不匹配 symlink）——治得好
     // 就不用禁用插件砍功能；自愈没改动任何文件或失败才走 auto-disable。
-    // 递归重试时 allowAutoDisable=false，两个分支都不会再触发，无死循环。
-    if (AUTO_DISABLE_DSH_BROKEN && allowAutoDisable && !alive &&
-        /failed to (?:apply|import) loader entry|Cannot find (?:module|package)/i.test(errText)) {
-      const heal = trySelfHealDshPlugins(errText);
+    // rounds>0 时才触发，每轮重试消耗预算，归零即止，无死循环。
+    if (AUTO_DISABLE_DSH_BROKEN && rounds > 0 && !alive &&
+        /failed to (?:apply|import) loader entry|Cannot find (?:module|package)/i.test(errFull)) {
+      const heal = trySelfHealDshPlugins(errFull);
       if (heal.tried && heal.ok) {
-        const retried = launchDshWebAndWait(false);
+        const retried = launchDshWebAndWait(rounds - 1);
         return Object.assign({ bound: false, self_healed: heal }, retried);
       }
       // 自动禁用损坏 bundle（仅在 enabled 时 + 子进程已退出 + stderr 含 loader 失败信号）
-      const fix = tryAutoDisableBrokenDshBundles(errText);
+      const fix = tryAutoDisableBrokenDshBundles(errFull);
       if (fix && fix.tried && fix.ok) {
-        // 重试一次（不允许再触发 auto-disable，避免不同插件连环触发导致无限循环）
-        const retried = launchDshWebAndWait(false);
+        const retried = launchDshWebAndWait(rounds - 1);
         return Object.assign({ bound: false, auto_disabled: fix }, retried);
       } else if (fix && fix.tried) {
         out('    ✗ 自动禁用失败: ' + (fix.error || 'unknown'));
-        if (!/ERR_MODULE_NOT_FOUND|Cannot find (module|package)|failed to import loader entry|loader entries failed to apply/i.test(errText)) {
+        if (!/ERR_MODULE_NOT_FOUND|Cannot find (module|package)|failed to import loader entry|loader entries failed to apply/i.test(errFull)) {
           out('       stderr 未识别为插件加载失败,改用通用建议:');
         }
       }
     }
-    if (/ERR_MODULE_NOT_FOUND|Cannot find (module|package)|failed to import loader entry|loader entries failed to apply/i.test(errText)) {
+    if (/ERR_MODULE_NOT_FOUND|Cannot find (module|package)|failed to import loader entry|loader entries failed to apply/i.test(errFull)) {
       out('    💡 看起来是 ~/.dsh/profiles/web 下插件加载失败（模块缺失/损坏）');
       out('       修复: cd ~/.dsh/profiles/web && pnpm install');
       out('       或在该目录跑 npm update 把所有 plugin 升到最新兼容版本');
@@ -1029,23 +1069,24 @@ function launchDshWebAndWait(allowAutoDisable) {
   }
   if (!stable) {
     out('    ! 进程在就绪后 ~15s 内退出——通常是 ~/.dsh/profiles/web 下的插件与当前 dsh 不兼容');
-    // dump stderr 让用户看到具体哪个插件挂了
-    const errText2 = readLogTail(r.err_log, 4096);
+    // dump stderr 让用户看到具体哪个插件挂了;匹配/自愈同样用全文（见上方 bound 分支注释）
+    const errFull2 = readLogTail(r.err_log, 256 * 1024);
+    const errText2 = errFull2.slice(-4096);
     if (errText2) {
       out('    --- dsh web stderr (尾部) ---');
       out(indentLines(errText2, '    '));
     }
     // 同样的「先自愈、后禁用」流程（端口先 bind 后立刻退出 = 子进程仍可读到 stderr）
-    if (AUTO_DISABLE_DSH_BROKEN && allowAutoDisable && errText2 &&
-        /failed to (?:apply|import) loader entry|Cannot find (?:module|package)/i.test(errText2)) {
-      const heal = trySelfHealDshPlugins(errText2);
+    if (AUTO_DISABLE_DSH_BROKEN && rounds > 0 && errFull2 &&
+        /failed to (?:apply|import) loader entry|Cannot find (?:module|package)/i.test(errFull2)) {
+      const heal = trySelfHealDshPlugins(errFull2);
       if (heal.tried && heal.ok) {
-        const retried = launchDshWebAndWait(false);
+        const retried = launchDshWebAndWait(rounds - 1);
         return Object.assign({ bound: true, stable: false, self_healed: heal }, retried);
       }
-      const fix = tryAutoDisableBrokenDshBundles(errText2);
+      const fix = tryAutoDisableBrokenDshBundles(errFull2);
       if (fix && fix.tried && fix.ok) {
-        const retried = launchDshWebAndWait(false);
+        const retried = launchDshWebAndWait(rounds - 1);
         return Object.assign({ bound: true, stable: false, auto_disabled: fix }, retried);
       } else if (fix && fix.tried) {
         out('    ✗ 自动禁用失败: ' + (fix.error || 'unknown'));

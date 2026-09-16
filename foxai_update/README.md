@@ -191,6 +191,11 @@ dsh（DeepSeek Harness）作为第 7 款工具走 npm 检查/升级；升级完�
 **实现要点**：
 
 - 探活：独立子进程 `scripts/lib/tcp-probe.js` 做 TCP connect（主进程里同步等待会阻塞事件循环，socket 回调永远不触发，所以必须外移到子进程）；内嵌 `node -e` 运行的插件模式找不到该文件时退化为 lsof/netstat 端口占用判断
+- 僵尸进程识别：等待端口期间事件循环被阻塞，libuv 收不到 SIGCHLD、不会 reap 已崩溃的 dsh 子进程——`kill(pid,0)` 对僵尸照样返回成功，`alive=true` 会挡住自愈/自动禁用（2026-09 实例：spawn 后 3s 崩溃，60s 后仍误报存活）。`isProcessAlive` 会读 Linux `/proc/<pid>/stat` 或 macOS `ps -o stat=` 识别 `Z` 状态
+- 启动失败自愈（默认开启，`--no-auto-disable-dsh-plugins` 关闭）：崩溃 stderr **全文**匹配（只取尾部 4KB 会截掉排在前面的报错，多插件损坏时漏检），先自愈后禁用——
+  1. **自愈 A**：`@openviking/dsh-memory-plugin` 的 `shared/` 缺失（GitHub 源 tarball 不含生成产物）→ 从 pnpm-lock 锁定 commit（兼容 `tar.gz/<sha>#path:` 与旧 `#<sha>&path:` 两种格式）浅取 OpenViking 仓库，重建 `shared/` 传递闭包
+  2. **自愈 B**：loader 用真实包名 import、目录却按依赖别名装（如 `@smalltailqwq/…` 装在 `@dsh-external/…` 下）→ 补 `node_modules` symlink（扫描兼容 pnpm 的 symlink 布局）
+  3. **自动禁用**：自愈治不好才从 `dsh.profile.bundles` 移除 stderr 明确点名的条目（备份 `.bak.<ts>`，可 `cp` 回滚）；任意一项自愈成功即先重启复核，仍坏的条目由下一轮接手——轮次预算 3 轮，天然防死循环
 - 进程定位：优先 lsof/netstat 找端口占用者（最准，识别自定义端口）；系统繁忙 lsof 超时（实测刚跑完 npm install 后可超 8s）时退回 `ps` 命令行扫描（`…/bin/dsh web` 本体与 `npm exec @deepseek-ai/dsh web` 包装器），双保险
 - kill 策略：SIGTERM → 5s 宽限 → SIGKILL；随后向上清理 dsh 相关包装进程（`npm exec` 等），遇到用户 shell 立即停手
 - 就绪复核：dsh 先 bind 端口、后加载 profile 插件——插件与新版本不兼容时会在就绪后数秒内退出（实测 0.1.2-rc.1 在 bind 后 2~8s 崩，单次 3s 复核抓不到），所以 bind 成功后轮询 ~15s 全程存活才报 `stable: true`
@@ -212,7 +217,7 @@ dsh（DeepSeek Harness）作为第 7 款工具走 npm 检查/升级；升级完�
 - **插件激活后工具没出现 / 调用报 subprocess 不可用**：宿主需挂载 `@deepseek-ai/dsh-subprocess-local`（`dsh-base` 标准组成）。工具会降级返回等价的手动命令，不会静默失败。
 - **识别为 external**：说明该 CLI 是 brew/官方安装器装的。想交给本插件管理，先卸载原渠道版本（如 `brew uninstall gemini-cli`）再运行。
 - **升级期间正在使用某 CLI**：npm 替换的是磁盘文件，已运行的进程不受影响，下次启动生效。
-- **DSH web 重启后马上退出（`stable: false`）**：通常是 `~/.dsh/profiles/web` 下安装的第三方插件（如 `@linxin666/dsh-web-ui-all` 等 skin/面板类）与新版本 dsh 的 API 不兼容（2026-09 实例：`0.1.2-rc.1` 移除 `settingsNamespace` 导出导致 `web-ui-settings` 入口加载失败）。脚本已用 pin 锁在 `0.1.1-rc.2` 自动规避；若 pin 后仍失败，到该 profile 目录执行 `npm update` 升级插件后重跑一键脚本。
+- **DSH web 重启后马上退出（`stable: false`）**：通常是 `~/.dsh/profiles/web` 下安装的第三方插件（如 `@linxin666/dsh-web-ui-all` 等 skin/面板类）与新版本 dsh 的 API 不兼容（2026-09 实例：`0.1.2-rc.1` 移除 `settingsNamespace` 导出导致 `web-ui-settings` 入口加载失败）。脚本已用 pin 锁在 `0.1.1-rc.2` 自动规避；若 pin 后仍失败，到该 profile 目录执行 `npm update` 升级插件后重跑一键脚本。插件**文件级损坏**（`shared/` 缺失、别名装包 loader 找不到）脚本会自动自愈或兜底禁用（见「实现要点·启动失败自愈」），无需手动处理。
 - **为什么 DSH 插件里默认不 kill 重启**：插件本身跑在 DSH GUI 的会话里，kill web 进程会断掉当前会话；一键脚本（在普通终端双击运行）才是重启 DSH web 的推荐入口。
 - **Pi extensions 在哪管理**：用 `pi install <npm pkg>` / `pi list` / `pi remove` 命令；本插件不安装新 extension（只升级已装的）。新装仍需走 `pi install`。
 
