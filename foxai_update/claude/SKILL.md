@@ -36,11 +36,11 @@ description: 检查/安装/升级 8 款 AI CLI 编码工具（Claude Code、Code
    ```
    未安装的自动安装，落后的自动升级；结束后报告汇总。
 
-3. **可选**：只处理部分工具 `--only pi,claude`；追加可选工具（OpenClaw / Hermes Agent）加 `--with openclaw,hermes`；机器可读结果加 `--json`（末尾 `##JSON##` 行）。
+3. **可选**：只处理部分工具 `--only pi,claude`；追加可选工具（OpenClaw / Hermes Agent）加 `--with openclaw,hermes`（可重复出现自动合并）；Node.js 落后时升级加 `--update-node`（按渠道：nvm/brew/scoop/winget，不可静默升级的渠道给手动指引）；机器可读结果加 `--json`（末尾 `##JSON##` 行）。
 
 ## 规则
 
 - 状态为 `external` 的工具（brew/官方安装器渠道）**不要**强行 npm 安装，向用户说明双渠道冲突，由用户决定是否卸载原渠道。
 - 状态为 `unknown`（网络不通）时不要反复重试，提示用户检查网络。
 - Linux 下若失败详情含 EACCES，按脚本给出的提示转述两条方案：`sudo npm install -g <pkg>@latest` 或改用户级前缀 `npm config set prefix ~/.npm-global`（并把 `~/.npm-global/bin` 加入 PATH）。
-- 用户问「开机一键」时，告知双击入口：macOS `FoxAI一键检查更新.command` / Windows `FoxAI一键检查更新.bat` / Linux `foxai-update-linux.sh`（均在 foxai_update/ 目录）。
+- 用户问「开机一键」时，告知双击入口：macOS `FoxAI一键检查更新.command` / Windows `FoxAI一键检查更新.bat` / Linux `foxai-update-linux.sh`（均在 foxai_update/ 目录）。一键入口额外提供：Node.js 缺失时自动引导安装（brew/tarball 或 winget/MSI）、Node.js 落后时自动升级（`--update-node`）、可选工具 OpenClaw / Hermes Agent 逐个 y/n 确认。

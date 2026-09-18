@@ -40,7 +40,7 @@ foxai-update-linux.sh         ├─ 工具 foxai_cli_update（agent 可调用�
 FoxAI一键检查更新.bat         └─ Web 结果卡片（plugin/client.js）
 ```
 
-- 双击入口只是薄包装：定位目录 → `node scripts/update-cli-tools.js --restart-dsh-web` → 暂停窗口
+- 双击入口只是薄包装：定位目录 → Node.js 引导（缺失时自动安装）→ 可选工具分别 y/n 确认（OpenClaw / Hermes Agent）→ `node scripts/update-cli-tools.js --restart-dsh-web --update-node` → 暂停窗口
 - DSH 插件把核心脚本以字符串内嵌进 host bundle（自包含，不依赖仓库路径），
   通过官方 `ctx.subprocess` 服务 `spawn(node, ['-e', 脚本, '--', flags])` 执行，
   解析脚本输出的 `##JSON##` 行返回结构化结果
@@ -55,7 +55,15 @@ FoxAI一键检查更新.bat         └─ Web 结果卡片（plugin/client.js�
 | Windows | 双击 `FoxAI一键检查更新.bat` | 需已安装 Node.js；UTF-8 输出（自动 `chcp 65001`） |
 | Linux | `./foxai-update-linux.sh`（或文件管理器「在终端中运行」） | 需 `chmod +x`（本仓库已设好） |
 
-全自动：可选工具确认（是否安装并升级 OpenClaw / Hermes Agent，答 `y` 纳入、回车或 `n` 跳过）→ 检查 → 缺失的安装 → 落后的升级 → 显示汇总表 → 按回车关闭。可把入口文件做替身放到桌面/Dock。
+全自动：Node.js 引导（缺失时自动安装，见 1.2）与版本升级（`--update-node`，渠道感知）→ 可选工具**分别**确认（OpenClaw、Hermes Agent 各问一次 y/n，答 `y` 纳入、回车或 `n` 跳过）→ 检查 → 缺失的安装 → 落后的升级 → 显示汇总表 → 按回车关闭。可把入口文件做替身放到桌面/Dock。
+
+#### 1.2) Node.js 引导与版本升级
+
+入口脚本运行前先探测 Node.js：
+
+- **缺失时自动引导安装** — macOS/Linux：brew 优先，无 brew 则从 npmmirror/nodejs.org 双源下载 tarball 装到 `~/.foxai/` 并把 bin 写入 shell profile 的 PATH（幂等）；Windows：winget 优先，无 winget 则查最新版下载 MSI 走安装向导（npmmirror/nodejs.org 双源）
+- **已装但落后时自动升级**（核心脚本 `--update-node` 阶段）— 按安装渠道（realpath 识别）分流：nvm（`nvm install <latest>` + alias default，并把新版 bin 前置到本进程 PATH）、brew（`brew upgrade node`）、scoop、nvm-windows（`nvm install/use`）、MSI 渠道（`winget upgrade`）；官方 pkg（`/usr/local`）与发行版包等无法免 sudo 静默升级的渠道给出手动指引。升级成功后自动重算 npm 全局目录与 npm 主版本缓存，后续工具安装基于新 Node
+- 直接调用核心脚本（含 DSH 插件路径）默认只**报告** Node 版本状态，不带 `--update-node` 不做改动
 
 #### 1.1) npm 11+ allow-scripts 说明（仅影响 grok）
 
@@ -69,6 +77,7 @@ node scripts/update-cli-tools.js --check          # 只看报告，不做任何�
 node scripts/update-cli-tools.js --only pi,claude # 只处理子集
 node scripts/update-cli-tools.js --with openclaw,hermes # 额外纳入可选工具（默认跳过）
 node scripts/update-cli-tools.js --json           # 末尾追加 ##JSON## 行（机器可读）
+node scripts/update-cli-tools.js --update-node    # Node.js 落后时按渠道升级（默认只报告）
 node scripts/update-cli-tools.js --launch-dsh-web  # 升级后确保 DSH web 在跑（没跑则启动）
 node scripts/update-cli-tools.js --restart-dsh-web # DSH web 在跑则 kill 后重启，没跑则启动
 ```

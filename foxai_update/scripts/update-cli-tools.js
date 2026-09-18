@@ -10,7 +10,10 @@
 //   node update-cli-tools.js --check            只检查报告，不做任何改动
 //   node update-cli-tools.js --json             末尾追加 ##JSON## 行（供插件解析）
 //   node update-cli-tools.js --only pi,claude   只处理指定子集
-//   node update-cli-tools.js --with openclaw,hermes  额外纳入可选工具(默认跳过)
+//   node update-cli-tools.js --with openclaw,hermes  额外纳入可选工具(默认跳过,
+//                                                 可重复出现自动合并,如两次 --with <id>)
+//   node update-cli-tools.js --update-node        Node.js 落后时按渠道升级(nvm/brew/
+//                                                 scoop/nvm-windows/winget);默认只报告
 //   node update-cli-tools.js --no-restore       跳过 CC Switch 环境变量恢复
 //   node update-cli-tools.js --launch-dsh-web   升级后确保 DSH web 在跑(没跑则启动)
 //   node update-cli-tools.js --restart-dsh-web  DSH web 在跑则 kill 后重启(没跑则启动)
@@ -112,12 +115,14 @@ function parseArgs(argv) {
     } else if (a.indexOf('--only=') === 0) {
       opts.only = a.slice(7);
     } else if (a === '--with') {
-      // 同 --only 的取值规则:紧跟值或 --with=<ids>
+      // 同 --only 的取值规则:紧跟值或 --with=<ids>。可重复出现,逗号合并
+      // (入口脚本对每个可选工具独立询问、各自追加一个 --with <id>)
       const v = argv[i + 1];
-      if (v && !v.startsWith('--')) { opts.with = v; i++; }
+      if (v && !v.startsWith('--')) { opts.with = opts.with ? opts.with + ',' + v : v; i++; }
       else { opts.with = ''; }
     } else if (a.indexOf('--with=') === 0) {
-      opts.with = a.slice(7);
+      const v2 = a.slice(7);
+      opts.with = opts.with ? opts.with + ',' + v2 : v2;
     }
   }
   return opts;
@@ -184,7 +189,8 @@ function NPM_ROOT_OF() {
   return String(res.stdout || '').trim().split('\n').pop().trim();
 }
 
-const NPM_ROOT = NPM_ROOT_OF();
+// let：node 升级成功后会在 main 的 Node.js 阶段重算（npm prefix 可能随新 node 变化）
+let NPM_ROOT = NPM_ROOT_OF();
 
 // ---------- 版本探测 ----------
 function installedVersion(pkgName) {
@@ -1285,6 +1291,102 @@ function nativeBinPath(tool) {
   } catch (_) { return ''; }
 }
 
+// ---------- Node.js 运行时：版本检查 / 升级（--update-node） ----------
+// 一键脚本带 --update-node：node 落后时按安装渠道尝试升级（nvm / brew / scoop /
+// nvm-windows / winget），无法静默升级的渠道（官方 pkg / 发行版包）给手动指引；
+// --check 或不带 flag 时只报告不改动。node 完全缺失时的引导安装在三个入口
+// 脚本里（那时本脚本根本跑不起来），此处只管「已装但落后」的情况。
+const UPDATE_NODE = process.argv.indexOf('--update-node') !== -1;
+
+function nodeLatestVersion() {
+  // `node` npm 包与 nodejs.org 同步发版；npm view 复用 npm 的代理/镜像配置，
+  // CN 网络下比直连 nodejs.org 更稳
+  const res = npm(['view', 'node', 'version'], 90000);
+  if (res.error || res.status !== 0) return '';
+  return String(res.stdout || '').trim().split('\n').pop().trim().replace(/^v/, '');
+}
+
+// 识别 node 安装渠道：realpath 解开 /usr/local/bin/node 这类符号链接后按路径特征判断
+function nodeChannel() {
+  let p = process.execPath;
+  try { p = fs.realpathSync(p); } catch (_) {}
+  const norm = String(p).replace(/\\/g, '/');
+  if (norm.indexOf('/.nvm/') !== -1) return 'nvm';
+  if (/homebrew|\/Cellar\//i.test(norm)) return 'brew';
+  if (/scoop/i.test(norm)) return 'scoop';
+  if (IS_WIN && /nvm/i.test(norm)) return 'nvm-windows';
+  if (IS_WIN) return 'installer'; // Program Files\nodejs（MSI/winget 装的）
+  return 'system';                // 官方 pkg(/usr/local) 或发行版包(/usr/bin)
+}
+
+function nodeRunTail(r) {
+  return String((r && (r.stderr || r.stdout)) || '').trim().split('\n').slice(-3).join(' ').slice(0, 300);
+}
+
+function tryUpgradeNode(latest) {
+  const res = { tried: true, ok: false, channel: nodeChannel(), error: '', note: '' };
+  const fail = function (r) {
+    res.error = (r && r.error && r.error.message) ? r.error.message : (nodeRunTail(r) || '退出码 ' + (r && r.status));
+    return res;
+  };
+  if (res.channel === 'nvm') {
+    const nvmDir = process.env.NVM_DIR || path.join(homeDir(), '.nvm');
+    const nvmSh = path.join(nvmDir, 'nvm.sh');
+    if (!fs.existsSync(nvmSh)) { res.error = '未找到 ' + nvmSh + '；请手动执行 nvm install ' + latest; return res; }
+    const r = spawnSync('bash', ['-c',
+      '. ' + JSON.stringify(nvmSh) + ' && nvm install ' + latest + ' && nvm alias default ' + latest],
+      { encoding: 'utf8', timeout: 600000, maxBuffer: 16 * 1024 * 1024 });
+    if (r.error || r.status !== 0) return fail(r);
+    // 新版 bin 目录前置到本进程 PATH：后续 npm 调用、工具安装、版本探测都走新 node
+    // （nvm 不改父进程 PATH，不前置的话本进程内仍全程旧版）
+    const newBin = path.join(nvmDir, 'versions', 'node', 'v' + latest, 'bin');
+    if (fs.existsSync(newBin)) process.env.PATH = newBin + path.delimiter + process.env.PATH;
+    res.note = 'nvm 已安装 v' + latest + ' 并设为 default；本脚本内已切到新版，其它已开终端需重开';
+    res.ok = true;
+    return res;
+  }
+  if (res.channel === 'brew') {
+    const r = run('brew', ['upgrade', 'node'], 600000);
+    const combined = String(r.stderr || '') + String(r.stdout || '');
+    // 「已是最新的 formula」也算成功（brew 版本可能滞后于 nodejs.org 最新）
+    if ((r.error || r.status !== 0) && !/already installed|no such.*installed|nothing to upgrade/i.test(combined)) return fail(r);
+    res.note = 'brew 渠道：已升到 brew formula 提供的版本（可能略滞后于 nodejs.org 最新）';
+    res.ok = true;
+    return res;
+  }
+  if (res.channel === 'scoop') {
+    const r = run('scoop', ['update', 'nodejs'], 600000);
+    if (r.error || r.status !== 0) return fail(r);
+    res.ok = true;
+    return res;
+  }
+  if (res.channel === 'nvm-windows') {
+    const r1 = run('nvm', ['install', latest], 600000);
+    if (r1.error || r1.status !== 0) return fail(r1);
+    const r2 = run('nvm', ['use', latest], 60000);
+    if (r2.error || r2.status !== 0) return fail(r2);
+    res.ok = true;
+    return res;
+  }
+  if (res.channel === 'installer') {
+    const w = run('winget', ['--version'], 15000);
+    if (w.error || w.status !== 0) {
+      res.error = '本机无 winget；请从 https://nodejs.org 下载 MSI 安装 v' + latest;
+      return res;
+    }
+    const r = run('winget', ['upgrade', '--id', 'OpenJS.NodeJS', '-e', '--silent',
+      '--accept-package-agreements', '--accept-source-agreements'], 900000);
+    if (r.error || r.status !== 0) return fail(r);
+    res.ok = true;
+    return res;
+  }
+  // system：官方 pkg(/usr/local) 或发行版包(/usr/bin)，免 sudo/免交互无法静默升级
+  res.error = IS_WIN
+    ? '该渠道无法静默升级；请从 https://nodejs.org 下载 MSI 覆盖安装 v' + latest
+    : '官方 pkg/系统包渠道无法静默升级；推荐改用 nvm（curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash）或 brew（brew install node），或到 https://nodejs.org 下载新版 pkg';
+  return res;
+}
+
 // ---------- 主流程 ----------
 function main() {
   if (!NPM_ROOT) {
@@ -1326,9 +1428,6 @@ function main() {
     filteredTools = TOOLS.filter(function (t) { return !t.optIn || withSet.indexOf(t.id) !== -1; });
   }
 
-  out(['工具'.padEnd(9), '状态'.padEnd(13), '当前版本'.padEnd(11), '最新版本'.padEnd(11), '操作'].join(''));
-  out('--------------------------------------------------------------');
-
   const results = [];
   const summary = {};
   const bump = (s) => { summary[s] = (summary[s] || 0) + 1; };
@@ -1337,6 +1436,51 @@ function main() {
   // cc-switch-restore 只认 APP_TARGETS 里登记过的 app（claude/codex）；
   // 其它工具（如 dsh）没有对应的 CC Switch 配置，不进恢复列表
   const RESTORE_APPS = new Set(['claude', 'codex']);
+
+  // ===== Node.js 运行时：先于工具表处理（node 是所有 CLI 的运行时底座）=====
+  let nodeInfo = { skipped: true, reason: 'not-applicable' };
+  {
+    out('--------------------------------------------------------------');
+    out('  … Node.js 运行时:');
+    const cur = process.versions.node;
+    const lat = nodeLatestVersion();
+    const channel = nodeChannel();
+    if (!lat) {
+      nodeInfo = { status: 'unknown', installed: cur, latest: '-', channel: channel,
+        action: '无法查询最新版本（npm view node 失败，检查网络）' };
+      out('    ? ' + nodeInfo.action + '（当前 v' + cur + '，渠道: ' + channel + '）');
+    } else if (verCmp(cur, lat) >= 0) {
+      nodeInfo = { status: 'ok', installed: cur, latest: lat, channel: channel, action: '已是最新' };
+      out('    ✓ 已是最新 v' + cur + '（渠道: ' + channel + '）');
+    } else if (CHECK_ONLY || !UPDATE_NODE) {
+      nodeInfo = { status: 'upgradable', installed: cur, latest: lat, channel: channel,
+        action: '可升级 v' + cur + ' → v' + lat + (CHECK_ONLY ? '' : '（升级需 --update-node）') };
+      out('    ! ' + nodeInfo.action + '（渠道: ' + channel + '）');
+    } else {
+      out('    … v' + cur + ' → v' + lat + '（渠道: ' + channel + '），正在升级 …');
+      const up = tryUpgradeNode(lat);
+      // 复核：PATH 上现在实际是哪个版本（nvm 已前置新版 bin；brew/安装器为原地覆盖）
+      const bp = run('node', ['--version'], 30000);
+      if (!bp.error && bp.status === 0) up.version_after = String(bp.stdout || '').trim().replace(/^v/, '');
+      if (up.ok) {
+        // node 升级可能改变 npm 前缀/自身版本：重算全局目录与主版本缓存，
+        // 让后续工具检查/安装都基于新 node（本进程 PATH 已在 tryUpgradeNode 里处理）
+        _npmMajorCache = null;
+        NPM_ROOT = NPM_ROOT_OF();
+        nodeInfo = { status: 'upgraded', installed: cur, latest: lat, channel: channel, upgrade: up,
+          action: '已升级（详见上方说明）' };
+        out('    ✓ ' + (up.note || '升级完成') + (up.version_after ? '，PATH 上现为 v' + up.version_after : ''));
+      } else {
+        bump('error');
+        nodeInfo = { status: 'error', installed: cur, latest: lat, channel: channel, error: up.error,
+          action: '升级失败' };
+        out('    ✗ ' + up.error);
+      }
+    }
+  }
+
+  out(['工具'.padEnd(9), '状态'.padEnd(13), '当前版本'.padEnd(11), '最新版本'.padEnd(11), '操作'].join(''));
+  out('--------------------------------------------------------------');
 
   for (const t of filteredTools) {
     // ensure-only 工具（herdr 等 brew 渠道）：只保证「装没装」，跳过下面整套
@@ -1639,6 +1783,7 @@ function main() {
     out('##JSON##' + JSON.stringify({
       checked_at: new Date().toISOString(),
       check_only: CHECK_ONLY,
+      node_js: nodeInfo,
       results: results,
       summary: summary,
       env_restore: envRestore,
