@@ -64,11 +64,11 @@ fi
 
 # 可选工具确认：分别询问是否安装并升级 OpenClaw / Hermes Agent（默认 n 跳过）
 EXTRA_ARGS=""
-read -r -p "是否安装并升级 OpenClaw? [y/N] " answer
+read -r -p "是否安装并升级 OpenClaw? [Y/N] " answer
 case "$answer" in
   [yY]|[yY][eE][sS]) EXTRA_ARGS="$EXTRA_ARGS --with openclaw" ;;
 esac
-read -r -p "是否安装并升级 Hermes Agent? [y/N] " answer
+read -r -p "是否安装并升级 Hermes Agent? [Y/N] " answer
 case "$answer" in
   [yY]|[yY][eE][sS]) EXTRA_ARGS="$EXTRA_ARGS --with hermes" ;;
 esac

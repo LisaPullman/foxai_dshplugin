@@ -64,11 +64,11 @@ if errorlevel 1 (
 rem 可选工具确认：分别询问是否安装并升级 OpenClaw / Hermes Agent（默认 n 跳过）
 set "EXTRA_ARGS="
 set "ANS="
-set /p ANS=是否安装并升级 OpenClaw? [y/N]
+set /p ANS=是否安装并升级 OpenClaw? [Y/N]
 if /i "%ANS%"=="y" set "EXTRA_ARGS=%EXTRA_ARGS% --with openclaw"
 if /i "%ANS%"=="yes" set "EXTRA_ARGS=%EXTRA_ARGS% --with openclaw"
 set "ANS="
-set /p ANS=是否安装并升级 Hermes Agent? [y/N]
+set /p ANS=是否安装并升级 Hermes Agent? [Y/N]
 if /i "%ANS%"=="y" set "EXTRA_ARGS=%EXTRA_ARGS% --with hermes"
 if /i "%ANS%"=="yes" set "EXTRA_ARGS=%EXTRA_ARGS% --with hermes"
 
