@@ -1,11 +1,11 @@
 ---
 name: foxai-cli-update
-description: 检查/安装/升级 5 款 AI CLI 编码工具（Claude Code、Codex CLI、Gemini CLI、OpenCode、Pi）。当用户想更新、升级、检查这些 CLI 的版本，或报怨某工具没装/过期时使用。核心脚本 node foxai_update/scripts/update-cli-tools.js，支持 --check（只看报告）与 --only（子集）。
+description: 检查/安装/升级 8 款 AI CLI 编码工具（Claude Code、Codex CLI、Gemini CLI、OpenCode、Pi、Grok CLI、dsh、herdr），另可选装 OpenClaw / Hermes Agent。当用户想更新、升级、检查这些 CLI 的版本，或报怨某工具没装/过期时使用。核心脚本 node foxai_update/scripts/update-cli-tools.js，支持 --check（只看报告）与 --only（子集）、--with（追加可选工具）。
 ---
 
 # FoxAI CLI 工具更新
 
-维护 5 款 AI CLI：`claude` / `codex` / `gemini` / `opencode` / `pi`（npm 包映射见下表）。
+维护 8 款 AI CLI：`claude` / `codex` / `gemini` / `opencode` / `pi` / `grok` / `dsh` / `herdr`（brew 渠道，npm 包映射见脚本内 TOOLS 注册表）；另有可选工具 `openclaw` / `hermes`（默认跳过，需 `--with openclaw,hermes` 或 `--only` 点名）。
 核心脚本（唯一事实来源，跨 macOS/Linux/Windows）：
 `<本仓库>/foxai_update/scripts/update-cli-tools.js`
 
@@ -16,6 +16,11 @@ description: 检查/安装/升级 5 款 AI CLI 编码工具（Claude Code、Code
 | gemini | @google/gemini-cli |
 | opencode | opencode-ai |
 | pi | @earendil-works/pi-coding-agent |
+| grok | @xai-official/grok |
+| dsh | @deepseek-ai/dsh（版本受 pin 管控） |
+| herdr | —（brew 渠道） |
+| openclaw（可选） | openclaw |
+| hermes（可选） | hermes-agent |
 
 ## 执行流程
 
@@ -31,7 +36,7 @@ description: 检查/安装/升级 5 款 AI CLI 编码工具（Claude Code、Code
    ```
    未安装的自动安装，落后的自动升级；结束后报告汇总。
 
-3. **可选**：只处理部分工具 `--only pi,claude`；机器可读结果加 `--json`（末尾 `##JSON##` 行）。
+3. **可选**：只处理部分工具 `--only pi,claude`；追加可选工具（OpenClaw / Hermes Agent）加 `--with openclaw,hermes`；机器可读结果加 `--json`（末尾 `##JSON##` 行）。
 
 ## 规则
 

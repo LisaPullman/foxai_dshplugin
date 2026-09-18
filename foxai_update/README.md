@@ -1,6 +1,6 @@
 # foxai_update — AI CLI 工具检查/安装/升级（DSH 插件 + 开机一键脚本）
 
-检查并维护 7 款 AI CLI 编码工具，未安装的自动通过 npm 全局安装，已安装的自动升级到最新版：
+检查并维护 8 款 AI CLI 编码工具，未安装的自动通过 npm 全局安装（herdr 走 brew），已安装的自动升级到最新版：
 
 | id | 工具 | npm 包 | 二进制 |
 | --- | --- | --- | --- |
@@ -11,6 +11,14 @@
 | `pi` | Pi | `@earendil-works/pi-coding-agent` | `pi` |
 | `grok` | Grok CLI | `@xai-official/grok` | `grok` |
 | `dsh` | DeepSeek Harness | `@deepseek-ai/dsh` | `dsh` |
+| `herdr` | Herdr | —（brew 渠道，ensure-only 不查升级） | `herdr` |
+
+另有两款**可选工具**（默认跳过，仅一键脚本询问 y/n 答应或显式 `--with` 点名时才安装并升级）：
+
+| id | 工具 | npm 包 | 二进制 |
+| --- | --- | --- | --- |
+| `openclaw` | OpenClaw | `openclaw` | `openclaw` |
+| `hermes` | Hermes Agent | `hermes-agent` | `hermes` |
 
 升级后还会自动做三类自愈：
 
@@ -23,7 +31,7 @@
 ## 架构
 
 ```
-scripts/update-cli-tools.js   ★ 核心逻辑（升级 7 款 CLI + DSH web 接管）
+scripts/update-cli-tools.js   ★ 核心逻辑（升级 8 款 CLI + 2 款可选 + DSH web 接管）
 scripts/cc-switch-restore.js ★ CC Switch 环境变量恢复（升级后自愈）
 scripts/lib/tcp-probe.js      ★ TCP 探活子进程（DSH web 探测用，独立事件循环）
         ↑                ↑
@@ -47,7 +55,7 @@ FoxAI一键检查更新.bat         └─ Web 结果卡片（plugin/client.js�
 | Windows | 双击 `FoxAI一键检查更新.bat` | 需已安装 Node.js；UTF-8 输出（自动 `chcp 65001`） |
 | Linux | `./foxai-update-linux.sh`（或文件管理器「在终端中运行」） | 需 `chmod +x`（本仓库已设好） |
 
-全自动：检查 → 缺失的安装 → 落后的升级 → 显示汇总表 → 按回车关闭。可把入口文件做替身放到桌面/Dock。
+全自动：可选工具确认（是否安装并升级 OpenClaw / Hermes Agent，答 `y` 纳入、回车或 `n` 跳过）→ 检查 → 缺失的安装 → 落后的升级 → 显示汇总表 → 按回车关闭。可把入口文件做替身放到桌面/Dock。
 
 #### 1.1) npm 11+ allow-scripts 说明（仅影响 grok）
 
@@ -59,6 +67,7 @@ grok CLI（`@xai-official/grok`）的 `postinstall` 会从 `@xai-official/grok-<
 node scripts/update-cli-tools.js                  # 检查并自动安装/升级
 node scripts/update-cli-tools.js --check          # 只看报告，不做任何改动
 node scripts/update-cli-tools.js --only pi,claude # 只处理子集
+node scripts/update-cli-tools.js --with openclaw,hermes # 额外纳入可选工具（默认跳过）
 node scripts/update-cli-tools.js --json           # 末尾追加 ##JSON## 行（机器可读）
 node scripts/update-cli-tools.js --launch-dsh-web  # 升级后确保 DSH web 在跑（没跑则启动）
 node scripts/update-cli-tools.js --restart-dsh-web # DSH web 在跑则 kill 后重启，没跑则启动
@@ -80,7 +89,7 @@ node scripts/update-cli-tools.js --restart-dsh-web # DSH web 在跑则 kill 后�
 | 参数 | 类型 | 说明 |
 | --- | --- | --- |
 | `check_only` | boolean | `true` 仅检查报告，不改动（默认 `false` 执行更新） |
-| `tools` | string[] | 只处理这些 id（默认全部 7 个） |
+| `tools` | string[] | 只处理这些 id（默认全部 8 个；可选工具 openclaw/hermes 需在此点名才会处理） |
 | `restart_dsh_web` | boolean | `true` 时若 DSH web 已在运行，先 kill 进程再用升级后的版本重启（默认 `false`，仅确保启动） |
 
 返回结构：
@@ -175,7 +184,7 @@ pi 在 `~/.pi/agent/npm/node_modules/` 下管理 user extensions，本插件在�
 
 ## 自愈 3：DSH web 升级/重启
 
-dsh（DeepSeek Harness）作为第 7 款工具走 npm 检查/升级；升级完成后接管其 web UI（全局 `dsh` 二进制，默认 `http://127.0.0.1:3080`，可用环境变量 `DSH_WEB_URL` 覆盖，如 `DSH_WEB_URL=http://127.0.0.1:9090`）的生命周期：
+dsh（DeepSeek Harness）作为第 7 款工具走 npm 检查/升级（版本受 pin 管控，见上）；升级完成后接管其 web UI（全局 `dsh` 二进制，默认 `http://127.0.0.1:3080`，可用环境变量 `DSH_WEB_URL` 覆盖，如 `DSH_WEB_URL=http://127.0.0.1:9090`）的生命周期：
 
 **版本锁定（pin）**：dsh 的目标版本受 `TOOLS` 注册表里的 `pin: '0.1.1-rc.2'` 管控——`0.1.2-rc.1` 移除了 `@deepseek-ai/dsh-settings` 的 `settingsNamespace` 导出，`~/.dsh/profiles/web` 的插件生态（`@linxin666/dsh-web-ui-all@0.3.6` 的 `web-ui-settings` 入口依赖它）尚未跟进，dsh web 会在 bind 端口后 2~8s 内崩溃（浏览器 `ERR_CONNECTION_REFUSED`）。因此：装了高版本的会**自动回退**到 pin；`--check` 显示 `已锁定 0.1.1-rc.2（latest … 因兼容性暂缓）`。启动用全局二进制而非 `npx -y`（npx 每次解析 registry latest，会绕开 pin）。上游插件适配后删除 pin 字段即恢复追最新。
 

@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 // =============================================================
 // foxai_update — AI CLI 编码工具 检查/安装/升级（跨平台：macOS / Linux / Windows）
-// 管辖工具: claude code / codex cli / gemini cli / opencode / pi / dsh(deepseek harness)
+// 管辖工具: claude code / codex cli / gemini cli / opencode / pi / grok /
+//   dsh(deepseek harness) / herdr(brew)；另有可选工具(openclaw / hermes)，
+//   默认跳过，仅 --with 点名或 --only 显式指定时才纳入。
 //
 // 用法:
 //   node update-cli-tools.js                    检查并自动安装/升级到最新
 //   node update-cli-tools.js --check            只检查报告，不做任何改动
 //   node update-cli-tools.js --json             末尾追加 ##JSON## 行（供插件解析）
 //   node update-cli-tools.js --only pi,claude   只处理指定子集
+//   node update-cli-tools.js --with openclaw,hermes  额外纳入可选工具(默认跳过)
 //   node update-cli-tools.js --no-restore       跳过 CC Switch 环境变量恢复
 //   node update-cli-tools.js --launch-dsh-web   升级后确保 DSH web 在跑(没跑则启动)
 //   node update-cli-tools.js --restart-dsh-web  DSH web 在跑则 kill 后重启(没跑则启动)
@@ -78,6 +81,14 @@ const TOOLS = [
     // 升级项——在上游适配前锁在 0.1.1-rc.2（2026-09 验证可用）。插件生态追上后
     // 删除本 pin 字段即恢复追最新。
     pin: '0.1.1-rc.2' },
+  // 可选工具（opt-in）：默认跳过（不查、不装、不升级），仅当调用方显式
+  // --with openclaw,hermes 或 --only 点名时才纳入——保证插件/CI 等非交互调用
+  // 行为不变。一键脚本(.command/.bat/.sh)会先问用户 y/n，答 y 才附加 --with。
+  // 注意：npm 上的 `opencraw` 是 0.0.1-security 占位包，正确包名是 openclaw
+  // （多渠道 AI 网关，CalVer 版本号）；hermes-agent 的 bin 有 hermes/hermes-npm/
+  // hermes-agent 三个，取主命令 hermes 探测。
+  { id: 'openclaw', name: 'OpenClaw',     pkg: 'openclaw',     bin: 'openclaw', optIn: true },
+  { id: 'hermes',   name: 'Hermes Agent', pkg: 'hermes-agent', bin: 'hermes',   optIn: true },
   // herdr：终端工作区管理器（AI coding agents 用），Homebrew 渠道。ensure-only：
   // 只保证「装没装」——未装则 brew install，已装即报 ok，不查 registry、不做
   // 版本监测/升级（升级交给用户手动 brew upgrade）。注意 npm 上的 herdr 是
@@ -88,7 +99,7 @@ const TOOLS = [
 
 // ---------- 参数解析（兼容 node file.js 与 node -e SCRIPT -- … 两种运行方式） ----------
 function parseArgs(argv) {
-  const opts = { check: false, json: false, only: null };
+  const opts = { check: false, json: false, only: null, with: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--check') opts.check = true;
@@ -100,6 +111,13 @@ function parseArgs(argv) {
       else { opts.only = ''; }  // 空字符串:在 main 里被当作 unknown 处理
     } else if (a.indexOf('--only=') === 0) {
       opts.only = a.slice(7);
+    } else if (a === '--with') {
+      // 同 --only 的取值规则:紧跟值或 --with=<ids>
+      const v = argv[i + 1];
+      if (v && !v.startsWith('--')) { opts.with = v; i++; }
+      else { opts.with = ''; }
+    } else if (a.indexOf('--with=') === 0) {
+      opts.with = a.slice(7);
     }
   }
   return opts;
@@ -129,6 +147,8 @@ const DSH_WEB_HOST = (function () {
 })();
 // 仅当 only 是字符串(可能为空)时建立 onlySet,null 表示未传 --only
 const onlySet = OPTS.only === null ? null : OPTS.only.split(',').map(function (s) { return s.trim() });
+// 同上,--with 的 id 集合(额外纳入的可选工具)
+const withSet = OPTS.with === null ? null : OPTS.with.split(',').map(function (s) { return s.trim() });
 
 function out(msg) { process.stdout.write(msg + '\n'); }
 
@@ -1279,8 +1299,11 @@ function main() {
   out(' 时间: ' + new Date().toLocaleString());
   out('==============================================================');
 
-  // 校验 --only 子集:识别并拒绝拼写错的工具 id,避免静默成功
-  let filteredTools = TOOLS;
+  // 校验 --only 子集:识别并拒绝拼写错的工具 id,避免静默成功。
+  // 工具筛选:默认全集 = 非 optIn 工具(openclaw/hermes 等可选工具默认跳过,
+  // 保证插件/CI 等非交互调用行为不变);--with 在默认全集上追加可选工具;
+  // --only 显式点名时可包含可选工具。--only 与 --with 同时出现时 --only 优先。
+  let filteredTools = TOOLS.filter(function (t) { return !t.optIn; });
   if (onlySet && onlySet.length > 0) {
     const knownIds = new Set(TOOLS.map(function (t) { return t.id; }));
     const unknown = onlySet.filter(function (id) { return !knownIds.has(id); });
@@ -1293,6 +1316,14 @@ function main() {
       out('✗ --only 过滤后没有可用工具');
       process.exit(2);
     }
+  } else if (withSet && withSet.length > 0) {
+    const knownIds = new Set(TOOLS.map(function (t) { return t.id; }));
+    const unknown = withSet.filter(function (id) { return !knownIds.has(id); });
+    if (unknown.length > 0) {
+      out('✗ --with 包含未知工具 id: ' + unknown.join(', ') + '（合法值: ' + Array.from(knownIds).join(', ') + '）');
+      process.exit(2);
+    }
+    filteredTools = TOOLS.filter(function (t) { return !t.optIn || withSet.indexOf(t.id) !== -1; });
   }
 
   out(['工具'.padEnd(9), '状态'.padEnd(13), '当前版本'.padEnd(11), '最新版本'.padEnd(11), '操作'].join(''));
