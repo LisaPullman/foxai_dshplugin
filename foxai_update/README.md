@@ -213,7 +213,8 @@ dsh（DeepSeek Harness）作为第 7 款工具走 npm 检查/升级（版本受 
 - 启动失败自愈（默认开启，`--no-auto-disable-dsh-plugins` 关闭）：崩溃 stderr **全文**匹配（只取尾部 4KB 会截掉排在前面的报错，多插件损坏时漏检），先自愈后禁用——
   1. **自愈 A**：`@openviking/dsh-memory-plugin` 的 `shared/` 缺失（GitHub 源 tarball 不含生成产物）→ 从 pnpm-lock 锁定 commit（兼容 `tar.gz/<sha>#path:` 与旧 `#<sha>&path:` 两种格式）浅取 OpenViking 仓库，重建 `shared/` 传递闭包
   2. **自愈 B**：loader 用真实包名 import、目录却按依赖别名装（如 `@smalltailqwq/…` 装在 `@dsh-external/…` 下）→ 补 `node_modules` symlink（扫描兼容 pnpm 的 symlink 布局）
-  3. **自动禁用**：自愈治不好才从 `dsh.profile.bundles` 移除 stderr 明确点名的条目（备份 `.bak.<ts>`，可 `cp` 回滚）；任意一项自愈成功即先重启复核，仍坏的条目由下一轮接手——轮次预算 3 轮，天然防死循环
+  3. **自愈 C**：`duplicate loader entry id: <id>`——同一插件以别名 + 真实名两份同时挂在 `dsh.profile.bundles`（如先装 `@dsh-external/dsh-client-ui-skin-maid-atelier`、后又 `dsh plugin add '@smalltailqwq/…'`），两份 `cordis.patch.yml` 注册同一 loader entry id，loader 拒绝启动 → 扫 `node_modules` 各 bundle 的 `cordis.patch.yml` 定位提供者，保留「目录 `package.json` name === bundle 名」的原生份、把别名份从 bundles 移除（依赖保留、备份 `.bak.<ts>`）；定位不到两份提供者时不改文件，交自动禁用兜底
+  4. **自动禁用**：自愈治不好才从 `dsh.profile.bundles` 移除 stderr 明确点名的条目（备份 `.bak.<ts>`，可 `cp` 回滚）；任意一项自愈成功即先重启复核，仍坏的条目由下一轮接手——轮次预算 3 轮，天然防死循环；stderr 没指向任何 bundle 且自愈无改动时不再空转重试
 - 进程定位：优先 lsof/netstat 找端口占用者（最准，识别自定义端口）；系统繁忙 lsof 超时（实测刚跑完 npm install 后可超 8s）时退回 `ps` 命令行扫描（`…/bin/dsh web` 本体与 `npm exec @deepseek-ai/dsh web` 包装器），双保险
 - kill 策略：SIGTERM → 5s 宽限 → SIGKILL；随后向上清理 dsh 相关包装进程（`npm exec` 等），遇到用户 shell 立即停手
 - 就绪复核：dsh 先 bind 端口、后加载 profile 插件——插件与新版本不兼容时会在就绪后数秒内退出（实测 0.1.2-rc.1 在 bind 后 2~8s 崩，单次 3s 复核抓不到），所以 bind 成功后轮询 ~15s 全程存活才报 `stable: true`

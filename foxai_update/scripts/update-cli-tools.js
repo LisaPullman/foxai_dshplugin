@@ -136,9 +136,9 @@ const RESTART_DSH_WEB = process.argv.indexOf('--restart-dsh-web') !== -1;
 // 自动从 ~/.dsh/profiles/web/package.json 的 dsh.profile.bundles 移除 dsh web 启动失败时
 // 报错的插件条目(常见: GitHub 源 prepack 没跑导致 shared/ 缺失、插件作者把 loader name
 // 写成了跟 bundle 名字不一样的形式)。操作前会备份原文件(.bak.<ts>),只移除 stderr
-// 中明确提到的 bundle,避免误伤其它正常插件;且仅在自愈(symlink/shared 重建)治不好时
-// 才执行。默认开启——一键脚本、核心脚本直跑、DSH 插件路径行为一致;不想要的调用方
-// 显式传 --no-auto-disable-dsh-plugins 关掉。
+// 中明确提到的 bundle,避免误伤其它正常插件;且仅在自愈(symlink/shared 重建/重复
+// 挂载去重)治不好时才执行。默认开启——一键脚本、核心脚本直跑、DSH 插件路径行为
+// 一致;不想要的调用方显式传 --no-auto-disable-dsh-plugins 关掉。
 const AUTO_DISABLE_DSH_BROKEN = (function () {
   if (process.argv.indexOf('--no-auto-disable-dsh-plugins') !== -1) return false;
   return true; // --auto-disable-dsh-plugins 旧 flag 保留兼容,现为默认行为
@@ -441,6 +441,15 @@ function indentLines(text, prefix) {
   return String(text || '').split(/\r?\n/).map(function (l) { return prefix + l; }).join('\n');
 }
 
+// dsh web stderr「插件树加载失败」特征正则,集中定义多处共用:
+//   GATE —— 触发自愈/自动禁用的门禁(DEBUG pattern 行、启动失败分支、bind 后崩溃分支);
+//   HINT —— 给用户的建议文案选择,比 GATE 多认 ERR_MODULE_NOT_FOUND 与复数失败总结行。
+// 涵盖三类信号: loader entry 应用/导入失败、模块/包缺失、同一 loader entry id 被
+// 重复注册(同一插件以别名+真实名两份同时挂 bundles,2026-09 实例:
+// @dsh-external/dsh-client-ui-skin-maid-atelier 与 @smalltailqwq/… 并存)。
+const DSH_PLUGIN_FAIL_GATE_RE = /failed to (?:apply|import) loader entry|Cannot find (?:module|package)|duplicate loader entry id/i;
+const DSH_PLUGIN_FAIL_HINT_RE = /ERR_MODULE_NOT_FOUND|Cannot find (?:module|package)|failed to import loader entry|loader entries failed to apply|duplicate loader entry id/i;
+
 // 从 dsh web 启动失败 stderr 中识别「在 dsh.profile.bundles 数组里」的损坏 bundle。
 // 启发式: stderr 里 loader 报错会引用「插件在 bundle 列表里的名字」或「插件 package.json
 // 里的 name 字段」,两者经常不一样(如 bundle=`@dsh-external/dsh-client-ui-skin-maid-atelier` 、
@@ -456,6 +465,11 @@ function detectBrokenDshBundles(errText, allBundles) {
   const re = /failed to import loader entry ([^\s(]+)/g;
   let m;
   while ((m = re.exec(errText)) !== null) loaderIds.push(m[1]);
+  // duplicate loader entry id: <id> 同样是 loader 点名——正常路径由去重自愈(自愈 C)
+  // 保留一份、只移除别名份;它治不好时 auto-disable 在此兜底,会把两份提供者都
+  // 移除(插件功能丢但 dsh 能起,备份可恢复)。
+  const dupRe = /duplicate loader entry id:?\s*([^\s:()']+)/g;
+  while ((m = dupRe.exec(errText)) !== null) loaderIds.push(m[1]);
   for (const b of allBundles) {
     if (!b || typeof b !== 'string') continue;
     if (errText.indexOf(b) !== -1) { out.push(b); continue; }
@@ -727,6 +741,13 @@ function waitForBind(host, port, timeoutMs) {
 //    Node 从 profile root 按真实名解析不到 → Cannot find package。
 //    自愈：扫 node_modules 下 package.json name === 报错缺的包名的目录，
 //    建 node_modules/<真实名> → <别名目录> 的 symlink。
+// C. duplicate loader entry id：<id>——同一插件后来又按真实名装了一份（如用户跑
+//    `dsh plugin add '@smalltailqwq/…'`），与早先的别名份同时留在 bundles 里，
+//    两份 cordis.patch.yml 注册同一个 loader entry id，loader 拒绝启动。
+//    自愈：扫 node_modules 里各 bundle 的 cordis.patch.yml 找出该 id 的提供者，
+//    ≥2 个时保留「安装目录 package.json name === bundle 名」的原生份（无需 symlink），
+//    其余别名份从 dsh.profile.bundles 移除（依赖保留、备份先行，同 auto-disable 策略）。
+//    识别不出提供者时不改文件，交给 auto-disable 兜底（两份全移，功能丢但能启动）。
 
 function dshProfileDir() {
   return (process.env.DSH_PROFILE_DIR && process.env.DSH_PROFILE_DIR.trim()) ||
@@ -937,7 +958,91 @@ function healBundleNameMismatch(profileDir, errText) {
   return res;
 }
 
-// 自愈编排：按 stderr 特征触发 A/B；治好任意一项且无失败即视为成功（调用方会重启 dsh web 复核）
+// 读取 bundle 安装目录下 cordis.patch.yml 里声明的 loader entry id 列表。
+// 该文件是 entry 数组,每个 entry 以 id: <值> 为键(实际形态 `- id: ui-skin-maid-atelier`,
+// 值可带引号)。只认行首(可有 - / 缩进)的 id:,不会误抓 name:/wiring.id: 等键。
+// 读不到(未安装/无该文件/读取异常)返回 null,与「装了但声明为空」区分开。
+function cordisPatchEntryIds(bundleName, profileDir) {
+  let text;
+  try {
+    text = fs.readFileSync(path.join(profileDir, 'node_modules', bundleName, 'cordis.patch.yml'), 'utf8');
+  } catch (_) { return null; }
+  const ids = [];
+  const re = /^\s*-?\s*id:\s*['"]?([^\s'"]+)['"]?\s*$/gm;
+  let m; while ((m = re.exec(text)) !== null) ids.push(m[1]);
+  return ids;
+}
+
+// 自愈 C：duplicate loader entry id 去重(见上方模式说明)。
+function healDuplicateLoaderEntries(profileDir, errText) {
+  const res = { ran: false, ok: false, healed: [], error: '', ids: [], kept: '', removed: [], backup: '' };
+  const dupRe = /duplicate loader entry id:?\s*([^\s:()']+)/g;
+  const dupIds = [];
+  let m;
+  while ((m = dupRe.exec(errText)) !== null) dupIds.push(m[1]);
+  if (!dupIds.length) return res;
+  res.ran = true;
+  res.ids = Array.from(new Set(dupIds));
+
+  const pkgPath = path.join(profileDir, 'package.json');
+  let pkg;
+  try { pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')); }
+  catch (e) { res.error = 'package.json 读/解析失败: ' + String((e && e.message) || e); return res; }
+  const bundles = pkg && pkg.dsh && pkg.dsh.profile && pkg.dsh.profile.bundles;
+  if (!Array.isArray(bundles)) { res.error = 'package.json 缺少 dsh.profile.bundles 数组'; return res; }
+
+  // 找出 bundles 里提供重复 id 的条目(以 node_modules 里实际安装的 cordis.patch.yml 为准)
+  const providers = [];
+  for (const b of bundles) {
+    if (!b || typeof b !== 'string') continue;
+    const ids = cordisPatchEntryIds(b, profileDir);
+    if (ids && res.ids.some(function (id) { return ids.indexOf(id) !== -1; })) providers.push(b);
+  }
+  if (providers.length < 2) {
+    // 提供者不足两份:可能有一份未安装(patch 读不到)或 id 来自别处,信息留给日志,不盲改
+    res.error = 'bundles 里只定位到 ' + providers.length + ' 个提供者(' + res.ids.join(', ') + ')';
+    return res;
+  }
+
+  // 选保留份:① 安装目录 package.json 的 name === bundle 名(原生可解析,不依赖
+  // symlink 自愈)优先;② 非 @dsh-external/ 别名前缀;③ 按 bundles 原始顺序。
+  const score = function (b) {
+    let s = 0;
+    try {
+      const pj = JSON.parse(fs.readFileSync(path.join(profileDir, 'node_modules', b, 'package.json'), 'utf8'));
+      if (pj.name === b) s += 2;
+    } catch (_) {}
+    if (b.indexOf('@dsh-external/') !== 0) s += 1;
+    return s;
+  };
+  const ranked = providers.slice().sort(function (a, b2) {
+    return score(b2) - score(a); // 稳定排序:分相同保持原顺序
+  });
+  const keeper = ranked[0];
+  const losers = providers.filter(function (b) { return b !== keeper; });
+
+  const ts = Date.now();
+  const backup = pkgPath + '.bak.' + ts;
+  try { fs.copyFileSync(pkgPath, backup); }
+  catch (e) { res.error = '备份失败: ' + String((e && e.message) || e); return res; }
+  const loserSet = new Set(losers);
+  pkg.dsh.profile.bundles = bundles.filter(function (b) { return !loserSet.has(b); });
+  try {
+    fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n', 'utf8');
+  } catch (e) {
+    try { fs.copyFileSync(backup, pkgPath); } catch (_) {}
+    res.error = '写回失败已回滚: ' + String((e && e.message) || e);
+    return res;
+  }
+  res.ok = true;
+  res.kept = keeper;
+  res.removed = losers;
+  res.backup = backup;
+  res.healed = losers.slice();
+  return res;
+}
+
+// 自愈编排：按 stderr 特征触发 A/B/C；治好任意一项且无失败即视为成功（调用方会重启 dsh web 复核）
 function trySelfHealDshPlugins(errText) {
   const result = { tried: false, ok: false, error: '', healed: [] };
   const profileDir = dshProfileDir();
@@ -962,6 +1067,15 @@ function trySelfHealDshPlugins(errText) {
     steps.push(r2);
     for (const h of r2.healed) out('    🔧 自愈: node_modules/' + h.link + ' -> ' + h.target + '（loader 名不匹配）');
     if (!r2.ok) { result.error = result.error || ('bundle 名不匹配: ' + r2.error); out('    ✗ 自愈 bundle 名不匹配失败: ' + r2.error); }
+  }
+
+  // C：duplicate loader entry id: <id>（别名 + 真实名两份同时挂 bundles）
+  const r3 = healDuplicateLoaderEntries(profileDir, errText);
+  if (r3.ran) {
+    result.tried = true;
+    steps.push(r3);
+    if (r3.ok) out('    🔧 自愈: bundles 去重 loader id ' + r3.ids.join(', ') + ' — 保留 ' + r3.kept + '，移除 ' + r3.removed.join('、') + '（备份 ' + path.basename(r3.backup) + '）');
+    if (!r3.ok) { result.error = result.error || ('bundles 去重: ' + r3.error); out('    ✗ 自愈 bundles 去重失败: ' + r3.error); }
   }
 
   for (const s of steps) for (const h of s.healed) result.healed.push(h.file || h.link || h);
@@ -1038,7 +1152,7 @@ function launchDshWebAndWait(rounds) {
     const errText = errFull.slice(-4096);
     const outText = readLogTail(r.out_log, 2048);
     out('    ! 60s 内端口未 bind' + (alive ? '' : '（子进程 pid ' + r.pid + ' 已退出）'));
-    out('    [DEBUG] pid=' + r.pid + ' alive=' + alive + ' errLen=' + errFull.length + ' pattern=' + /failed to (?:apply|import) loader entry|Cannot find (?:module|package)/i.test(errFull));
+    out('    [DEBUG] pid=' + r.pid + ' alive=' + alive + ' errLen=' + errFull.length + ' pattern=' + DSH_PLUGIN_FAIL_GATE_RE.test(errFull));
     if (errText) {
       out('    --- dsh web stderr (尾部) ---');
       out(indentLines(errText, '    '));
@@ -1051,25 +1165,31 @@ function launchDshWebAndWait(rounds) {
     // 就不用禁用插件砍功能；自愈没改动任何文件或失败才走 auto-disable。
     // rounds>0 时才触发，每轮重试消耗预算，归零即止，无死循环。
     if (AUTO_DISABLE_DSH_BROKEN && rounds > 0 && !alive &&
-        /failed to (?:apply|import) loader entry|Cannot find (?:module|package)/i.test(errFull)) {
+        DSH_PLUGIN_FAIL_GATE_RE.test(errFull)) {
       const heal = trySelfHealDshPlugins(errFull);
       if (heal.tried && heal.ok) {
         const retried = launchDshWebAndWait(rounds - 1);
         return Object.assign({ bound: false, self_healed: heal }, retried);
       }
-      // 自动禁用损坏 bundle（仅在 enabled 时 + 子进程已退出 + stderr 含 loader 失败信号）
+      // 自动禁用损坏 bundle（仅在 enabled 时 + 子进程已退出 + stderr 含 loader 失败信号）。
+      // disabled 为空(no-match)说明 stderr 没指向任何 bundle、自愈也没改动文件——
+      // 配置没变,重试必然同样失败,不再消耗轮次预算(2026-09 实例:duplicate loader
+      // entry id 未被识别时白白跑了 3 轮 60s)。
       const fix = tryAutoDisableBrokenDshBundles(errFull);
-      if (fix && fix.tried && fix.ok) {
+      if (fix && fix.tried && fix.ok && fix.disabled.length > 0) {
         const retried = launchDshWebAndWait(rounds - 1);
         return Object.assign({ bound: false, auto_disabled: fix }, retried);
       } else if (fix && fix.tried) {
         out('    ✗ 自动禁用失败: ' + (fix.error || 'unknown'));
-        if (!/ERR_MODULE_NOT_FOUND|Cannot find (module|package)|failed to import loader entry|loader entries failed to apply/i.test(errFull)) {
+        if (!DSH_PLUGIN_FAIL_HINT_RE.test(errFull)) {
           out('       stderr 未识别为插件加载失败,改用通用建议:');
         }
       }
     }
-    if (/ERR_MODULE_NOT_FOUND|Cannot find (module|package)|failed to import loader entry|loader entries failed to apply/i.test(errFull)) {
+    if (/duplicate loader entry id/i.test(errFull)) {
+      out('    💡 同一插件以两个包名重复挂载（别名 + 真实名各一份）——手动修法:');
+      out('       编辑 ~/.dsh/profiles/web/package.json,从 dsh.profile.bundles 删掉其中一份(通常是 @dsh-external/… 别名那份)');
+    } else if (DSH_PLUGIN_FAIL_HINT_RE.test(errFull)) {
       out('    💡 看起来是 ~/.dsh/profiles/web 下插件加载失败（模块缺失/损坏）');
       out('       修复: cd ~/.dsh/profiles/web && pnpm install');
       out('       或在该目录跑 npm update 把所有 plugin 升到最新兼容版本');
@@ -1104,14 +1224,14 @@ function launchDshWebAndWait(rounds) {
     }
     // 同样的「先自愈、后禁用」流程（端口先 bind 后立刻退出 = 子进程仍可读到 stderr）
     if (AUTO_DISABLE_DSH_BROKEN && rounds > 0 && errFull2 &&
-        /failed to (?:apply|import) loader entry|Cannot find (?:module|package)/i.test(errFull2)) {
+        DSH_PLUGIN_FAIL_GATE_RE.test(errFull2)) {
       const heal = trySelfHealDshPlugins(errFull2);
       if (heal.tried && heal.ok) {
         const retried = launchDshWebAndWait(rounds - 1);
         return Object.assign({ bound: true, stable: false, self_healed: heal }, retried);
       }
       const fix = tryAutoDisableBrokenDshBundles(errFull2);
-      if (fix && fix.tried && fix.ok) {
+      if (fix && fix.tried && fix.ok && fix.disabled.length > 0) { // 空 disabled=no-match,不空转重试(见启动失败分支注释)
         const retried = launchDshWebAndWait(rounds - 1);
         return Object.assign({ bound: true, stable: false, auto_disabled: fix }, retried);
       } else if (fix && fix.tried) {
