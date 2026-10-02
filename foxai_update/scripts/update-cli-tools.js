@@ -69,13 +69,18 @@ const TOOLS = [
   { id: 'opencode', name: 'OpenCode',    pkg: 'opencode-ai',                    bin: 'opencode' },
   { id: 'pi',       name: 'Pi',          pkg: '@earendil-works/pi-coding-agent', bin: 'pi' },
   // grok 的 postinstall 负责从 per-platform optional dep（@xai-official/grok-<plat>-<arch>）
-  // 解压 native 二进制到 bin/grok-native（141MB Mach-O）。npm 11+ 默认开启 allow-scripts
-  // 安全策略：未在白名单的 install scripts 会被静默跳过——不传 --allow-scripts，postinstall
-  // 不跑，CLI 启动会找不到 native（解到一半就退出会留下损坏的二进制，更难排查）。
+  // 解压 native 二进制。npm 11+ 默认开启 allow-scripts 安全策略：未在白名单的 install
+  // scripts 会被静默跳过——不传 --allow-scripts，postinstall 不跑，CLI 启动会找不到
+  // native（解到一半就退出会留下损坏的二进制，更难排查）。
   // 这里列白名单后，install 调用会自动追加 --allow-scripts=<pkg>（buildInstallArgs）；
   // 装完后探测 nativeBin 是否就位，未就位则自动重试一次（捕获「白名单生效但仍失败」）。
+  // native 落盘位置分平台：POSIX 是包内 bin/grok-native（141MB Mach-O/ELF，bin/grok
+  // 符号链接指向它）；Windows 的 postinstall 对 win32 提前返回不做包内落盘，改写
+  // $GROK_HOME（默认 ~/.grok）/bin/grok-<版本>.exe 再复制出 grok.exe——所以
+  // nativeBinWin 用相对 grok home 的带版本路径（见 nativeBinPath）。
   { id: 'grok',     name: 'Grok CLI',    pkg: '@xai-official/grok',             bin: 'grok',
-    allowScripts: ['@xai-official/grok'], nativeBin: 'bin/grok-native' },
+    allowScripts: ['@xai-official/grok'], nativeBin: 'bin/grok-native',
+    nativeBinWin: 'bin/grok-<VERSION>.exe' },
   { id: 'dsh',      name: 'DeepSeek Harness', pkg: '@deepseek-ai/dsh',           bin: 'dsh',
     // 兼容性锁：0.1.2-rc.1 移除了 @deepseek-ai/dsh-settings 的 settingsNamespace
     // 导出，~/.dsh/profiles/web 的插件生态（@linxin666/dsh-web-ui-all@0.3.6 的
@@ -208,6 +213,42 @@ function latestVersion(pkgName) {
   if (res.error || res.status !== 0) return '';
   const v = String(res.stdout || '').trim().split('\n').pop().trim();
   return v || '';
+}
+
+// 一次 npm view 同时拿 dist-tag latest（data.version）与全部已发布版本（data.versions）。
+// 解析失败/非 JSON（老 npm 输出格式、registry 异常）时返回 null，调用方退化为
+// latestVersion 的旧行为。
+function registryInfo(pkgName) {
+  const res = npm(['view', pkgName, 'version', 'versions', '--json'], 90000);
+  if (res.error || res.status !== 0) return null;
+  try {
+    const data = JSON.parse(String(res.stdout || '').trim());
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+    return {
+      tag: data.version ? String(data.version) : '',
+      versions: Array.isArray(data.versions) ? data.versions.map(String) : [],
+    };
+  } catch (e) { return null; }
+}
+
+// 镜像 dist-tag 防降级修正：npmmirror 等镜像的 dist-tag 同步可能滞后——实测
+// @xai-official/grok 的 latest 停在 0.1.4 而同一镜像的版本列表已有 1.0.46，脚本
+// 据此把「降级」当「升级」去装 0.1.4，还因该版本仅支持 darwin/arm64 直接
+// EBADPLATFORM 失败。当已装版本比 latest 新时，改用版本列表里不小于已装版本的
+// 最大稳定版（跳过 -beta 之类预发布）作目标；版本列表也拿不到更新的稳定版时
+// 返回 ''，由调用方按「registry 落后」跳过而非降级。只在 latest 落后于已装版本
+// 时介入，全新安装/正常追新的行为不变——不会把维护方故意压在 latest 之后的
+// 候选版本推给用户。
+function antiDowngradeTarget(cur, info) {
+  if (!cur || !info || !info.versions.length) return '';
+  let best = '';
+  for (let i = 0; i < info.versions.length; i++) {
+    const v = info.versions[i];
+    if (!/^\d+(\.\d+)*$/.test(v)) continue; // 只有纯数字稳定版有资格
+    if (verCmp(v, cur) < 0) continue;
+    if (!best || verCmp(v, best) > 0) best = v;
+  }
+  return best;
 }
 
 // 简易版本比较（覆盖本脚本用到的 x.y.z[-pre.n] 形态；非完整 semver）：
@@ -1400,13 +1441,23 @@ function buildInstallArgs(pkgSpec, allowScripts) {
   return args;
 }
 
-// native binary 探测：返回 <NPM_ROOT>/<pkg>/<nativeBin> 的绝对路径。
-// 仅在工具条目声明了 nativeBin 时调用（当前仅 grok 用到 bin/grok-native）。
+// native binary 探测：返回装完后 native 应当所在的绝对路径，'' 表示未知。
+// 仅在工具条目声明了 nativeBin 时调用（当前仅 grok）。POSIX 下是
+// <NPM_ROOT>/<pkg>/<nativeBin>（postinstall 解压出的 bin/grok-native）；
+// Windows 下声明了 nativeBinWin 的走 $GROK_HOME（默认 ~/.grok，与 grok 的
+// bootstrap 保持一致）下带版本的文件（bin/grok-<版本>.exe）——探带版本的文件，
+// 旧版残留的 grok.exe 不会把「postinstall 没跑」误判成成功。
 // 用于捕获 npm 11 默认跳过 install scripts 但 npm 退出码仍为 0 的「假成功」——
 // 调用方拿到路径后 fs.existsSync 决定是否重试一次。
-function nativeBinPath(tool) {
+function nativeBinPath(tool, targetVersion) {
   if (!tool || !tool.nativeBin) return '';
   try {
+    if (IS_WIN && tool.nativeBinWin) {
+      if (!targetVersion) return ''; // 模板路径没版本就没法探,视为未知
+      const home = process.env.GROK_HOME
+        || path.join(require('os').homedir(), '.grok');
+      return path.join(home, tool.nativeBinWin.replace('<VERSION>', targetVersion));
+    }
     return path.join.apply(null, [NPM_ROOT].concat(tool.pkg.split('/'), tool.nativeBin.split('/')));
   } catch (_) { return ''; }
 }
@@ -1647,10 +1698,17 @@ function main() {
     }
 
     const cur = installedVersion(t.pkg);
-    const lat = latestVersion(t.pkg);
+    const reg = registryInfo(t.pkg);
+    const lat = (reg && reg.tag) ? reg.tag : latestVersion(t.pkg);
     // 目标版本：有 pin（兼容性锁，见 TOOLS 注册表注释）用 pin，否则 registry
     // latest。pin 是本地常量，即使网络拿不到 latest 也能照常比对/安装。
-    const target = t.pin || lat;
+    // latest 落后于已装版本（镜像 dist-tag 滞后，见 antiDowngradeTarget 注释）
+    // 时用版本列表里的最大稳定版修正目标，避免把降级当升级。
+    let target = t.pin || lat;
+    if (!t.pin && cur && lat && verCmp(lat, cur) < 0) {
+      const fixed = antiDowngradeTarget(cur, reg);
+      if (fixed) target = fixed;
+    }
     let status = '', action = '', verFrom = cur || '-', verTo = target || '-', err = '';
 
     if (!target) {
@@ -1677,7 +1735,7 @@ function main() {
         // native binary 自愈：npm 11+ allow-scripts 默认拦截未在白名单的 install scripts，
         // 静默跳过 postinstall 但 npm 退出码仍为 0 — 装完看不到 native binary 即失败。
         // 重试一次（同样的 buildInstallArgs 已带 --allow-scripts=...，等 npm 配置生效）。
-        const nbPath = nativeBinPath(t);
+        const nbPath = nativeBinPath(t, target);
         const nativeMissing = !!(nbPath && !fs.existsSync(nbPath));
         let final = res;
         let retried = false;
@@ -1702,6 +1760,13 @@ function main() {
       } else {
         action = '已是最新';
       }
+    } else if (!t.pin && verCmp(cur, target) > 0) {
+      // 防降级护栏：无 pin 却要把已装版本换到更低版本 = registry 数据落后（镜像的
+      // dist-tag 与版本列表都滞后，或上游回撤了 latest）。降级只会装出旧版甚至直接
+      // 失败（如 grok 0.1.4 仅支持 darwin/arm64，Windows 上 EBADPLATFORM），
+      // 按已最新处理并说明原因，等 registry 追上后再正常升级。
+      status = 'ok';
+      action = '已装 ' + cur + '，registry latest ' + target + ' 落后于已装版本，跳过（防降级）';
     } else if (CHECK_ONLY) {
       status = 'upgradable';
       if (t.pin && verCmp(cur, target) > 0) {
@@ -1714,7 +1779,7 @@ function main() {
       out('  … 正在' + (down ? '回退 ' : '升级 ') + t.name + ' ' + cur + ' → ' + target);
       const res = npm(buildInstallArgs(t.pkg + '@' + target, t.allowScripts), 600000);
       // 同 install 分支:native binary 自愈重试,捕获 npm 11 allow-scripts 静默跳过 postinstall。
-      const nbPath2 = nativeBinPath(t);
+      const nbPath2 = nativeBinPath(t, target);
       const nativeMissing2 = !!(nbPath2 && !fs.existsSync(nbPath2));
       let final2 = res;
       let retried2 = false;

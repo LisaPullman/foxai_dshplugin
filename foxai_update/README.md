@@ -67,7 +67,16 @@ FoxAI一键检查更新.bat         └─ Web 结果卡片（plugin/client.js�
 
 #### 1.1) npm 11+ allow-scripts 说明（仅影响 grok）
 
-grok CLI（`@xai-official/grok`）的 `postinstall` 会从 `@xai-official/grok-<plat>-<arch>` 解压 141MB 的 native binary `bin/grok-native`，跳过它 `grok` 命令直接不可用。npm 11 引入了 `allow-scripts` 安全门——不在白名单的 install scripts 会被静默跳过。本插件对 grok 的安装/升级会自动附带 `--allow-scripts=@xai-official/grok` 并在事后探测 native binary 是否落盘，缺失则自动重试一次。如果你手动跑 `npm install -g @xai-official/grok@<ver>`，需要自行附带该 flag，或一次性加入 npm 配置：`npm config set allow-scripts=@xai-official/grok --location=user`。
+grok CLI（`@xai-official/grok`）的 `postinstall` 会从 `@xai-official/grok-<plat>-<arch>` 解压 141MB 的 native binary，跳过它 `grok` 命令直接不可用。npm 11 引入了 `allow-scripts` 安全门——不在白名单的 install scripts 会被静默跳过。本插件对 grok 的安装/升级会自动附带 `--allow-scripts=@xai-official/grok` 并在事后探测 native binary 是否落盘，缺失则自动重试一次。native 的落盘位置分平台：macOS/Linux 是包内 `bin/grok-native`（`bin/grok` 符号链接指向它）；Windows 的 postinstall 不写包内文件，改落到 `$GROK_HOME`（默认 `~/.grok`）的 `bin/grok-<版本>.exe`（再复制出 `grok.exe`），探测按平台取对应路径。如果你手动跑 `npm install -g @xai-official/grok@<ver>`，需要自行附带该 flag，或一次性加入 npm 配置：`npm config set allow-scripts=@xai-official/grok --location=user`。
+
+#### 1.3) 镜像 dist-tag 滞后防降级（grok 实例）
+
+npmmirror 等镜像的 `latest` dist-tag 同步可能滞后：实测 `@xai-official/grok` 的 latest 停在 `0.1.4`，而同一镜像的版本列表已有 `1.0.46`（npmjs.org 的 latest 同为 `1.0.46`）。脚本若只看 dist-tag 会把「降级」当「升级」去装 `0.1.4`——该版本发布时仅支持 darwin/arm64，Windows 上直接 `EBADPLATFORM` 报「升级失败」。防护分两层：
+
+- **目标版本修正** — 已装版本比 registry latest 新时，改用版本列表里不小于已装版本的最大**稳定版**（跳过 `-beta` 等预发布）作升级目标；只在 latest 落后于已装版本时介入，全新安装与正常追新行为不变（不会把维护方故意压在 latest 之后的版本推给用户）
+- **防降级护栏** — 版本列表也拿不到更新的稳定版时（镜像整体滞后），按「已是最新」跳过并注明「registry latest 落后于已装版本」，绝不无 pin 降级
+
+
 
 ### 2) 核心脚本直接调用
 
