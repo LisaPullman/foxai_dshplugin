@@ -1,36 +1,40 @@
 @echo off
-rem =============================================================
-rem FoxAI 一键检查更新 — Windows 双击入口
-rem 功能(三个平台入口对齐):
-rem ① Node.js: 缺失时自动引导安装(winget 优先,退回 MSI 安装向导);
-rem    已装但落后时自动升级(渠道感知,不可静默升级的渠道给手动指引)
-rem ② 检查并自动安装/升级 7 款 AI CLI:
-rem    Claude Code / Codex CLI / Gemini CLI / OpenCode / Pi / Grok CLI / Herdr(brew)
-rem ③ 可选装 OpenClaw / Hermes Agent:分别询问 y/n,答 y 则安装并升级,答 n 跳过
-rem 需要网络；除可选工具的 y/n 确认外无需确认，结束后按任意键关闭窗口。
-rem 对应其他系统: macOS 用 FoxAI一键检查更新.command / Linux 用 foxai-update-linux.sh
-rem =============================================================
+rem ============================================================
+rem FoxAI one-click update - Windows entry (double-click)
+rem IMPORTANT: keep this file PURE ASCII (no Chinese/multibyte
+rem chars, no em-dash). cmd re-decodes the script with the old
+rem codepage when goto/for re-seek the file; multibyte bytes in
+rem comment/echo lines make it land mid-line and execute garbage.
+rem Chinese UI lives in scripts\update-cli-tools.js (UTF-8) -
+rem that is why chcp 65001 below must run before invoking node.
+rem Workflow (aligned with macOS .command / Linux .sh entries):
+rem  1) Node.js: bootstrap-install if missing (winget first,
+rem     fallback: download MSI via curl); upgrade if outdated
+rem  2) check/install/upgrade 7 AI CLIs: Claude Code / Codex /
+rem     Gemini CLI / OpenCode / Pi / Grok CLI / Herdr
+rem  3) optional OpenClaw / Hermes Agent (y/n prompts)
+rem macOS: the .command entry / Linux: foxai-update-linux.sh
+rem ============================================================
 chcp 65001 >nul
 cd /d "%~dp0"
 
-rem Node.js 引导：核心脚本跑在 node 上，node 缺失时先装好再继续
-rem （winget 优先；无 winget 则查最新版下载 MSI 走安装向导，npmmirror/nodejs.org 双源）
+rem Node.js bootstrap: the core script runs on node
 where node >nul 2>&1
 if not errorlevel 1 goto :node_ready
 
-echo 未检测到 Node.js，开始安装…
+echo Node.js not found - installing...
 where winget >nul 2>&1
 if not errorlevel 1 (
   winget install --id OpenJS.NodeJS -e --accept-package-agreements --accept-source-agreements
   goto :node_refresh
 )
 
-rem 无 winget：PowerShell 解析 index.json 拿最新版本号，curl 下 MSI 走安装向导
+rem No winget: resolve latest version via PowerShell, download MSI with curl
 set "NODE_VER="
 for /f "usebackq delims=" %%v in (`powershell -NoProfile -Command "(Invoke-RestMethod 'https://npmmirror.com/mirrors/node/index.json')[0].version"`) do set "NODE_VER=%%v"
 if "%NODE_VER%"=="" for /f "usebackq delims=" %%v in (`powershell -NoProfile -Command "(Invoke-RestMethod 'https://nodejs.org/dist/index.json')[0].version"`) do set "NODE_VER=%%v"
 if "%NODE_VER%"=="" (
-  echo 查询最新版本失败。请从 https://nodejs.org 下载 MSI 手动安装后重跑本脚本
+  echo Failed to query latest version. Please install Node.js manually from https://nodejs.org then re-run this script
   pause
   exit /b 1
 )
@@ -40,32 +44,32 @@ set "NODE_MSI=node-%NODE_VER%-%NODE_ARCH%.msi"
 curl -fSL --retry 3 -o "%TEMP%\%NODE_MSI%" "https://npmmirror.com/mirrors/node/%NODE_VER%/%NODE_MSI%"
 if errorlevel 1 curl -fSL --retry 3 -o "%TEMP%\%NODE_MSI%" "https://nodejs.org/dist/%NODE_VER%/%NODE_MSI%"
 if errorlevel 1 (
-  echo 下载 MSI 失败。请从 https://nodejs.org 手动下载安装后重跑本脚本
+  echo Failed to download MSI. Please download Node.js manually from https://nodejs.org then re-run this script
   pause
   exit /b 1
 )
 msiexec /i "%TEMP%\%NODE_MSI%"
 
 :node_refresh
-rem 安装器不改当前会话 PATH，手动补上再继续
+rem Installers do not update PATH of the current session - prepend manually
 set "PATH=%ProgramFiles%\nodejs;%PATH%"
 where node >nul 2>&1
 if errorlevel 1 (
-  echo Node.js 安装失败。请手动安装后重跑: https://nodejs.org
+  echo Node.js installation failed. Please install manually from https://nodejs.org then re-run
   pause
   exit /b 1
 )
 
 :node_ready
 
-rem 可选工具确认：分别询问是否安装并升级 OpenClaw / Hermes Agent（默认 n 跳过）
+rem Optional tools: ask y/n for OpenClaw / Hermes Agent (default n = skip)
 set "EXTRA_ARGS="
 set "ANS="
-set /p ANS=是否安装并升级 OpenClaw? [Y/N]
+set /p ANS=Install and upgrade OpenClaw? [Y/N]
 if /i "%ANS%"=="y" set "EXTRA_ARGS=%EXTRA_ARGS% --with openclaw"
 if /i "%ANS%"=="yes" set "EXTRA_ARGS=%EXTRA_ARGS% --with openclaw"
 set "ANS="
-set /p ANS=是否安装并升级 Hermes Agent? [Y/N]
+set /p ANS=Install and upgrade Hermes Agent? [Y/N]
 if /i "%ANS%"=="y" set "EXTRA_ARGS=%EXTRA_ARGS% --with hermes"
 if /i "%ANS%"=="yes" set "EXTRA_ARGS=%EXTRA_ARGS% --with hermes"
 
@@ -74,9 +78,9 @@ set RC=%ERRORLEVEL%
 
 echo.
 if "%RC%"=="0" (
-  echo [OK] 全部处理完成，无失败项。
+  echo [OK] All done, no failures.
 ) else (
-  echo [X] 存在失败项，请查看上方「错误详情」，或手动执行:
+  echo [X] Some items failed - see details above, or run manually:
   echo     node scripts\update-cli-tools.js --check
 )
 echo.

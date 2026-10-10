@@ -1,38 +1,42 @@
 @echo off
-rem foxai_cli_update 安装脚本（Windows）
-rem 构建 dist/ 产物并给出 cordis_define 激活指引
-rem macOS / Linux 请使用 install.sh
+rem foxai_cli_update installer (Windows)
+rem IMPORTANT: keep this file PURE ASCII (no Chinese/multibyte chars,
+rem no em-dash). cmd re-decodes the script with the old codepage when
+rem blocks re-seek the file; multibyte bytes make it land mid-line.
+rem Builds dist/ bundles and prints cordis_define activation hints.
+rem macOS / Linux: use install.sh
 chcp 65001 >nul
 cd /d "%~dp0"
 
-echo ==^> foxai_cli_update 安装脚本
+echo ==^> foxai_cli_update installer
 echo.
 
 where node >nul 2>nul
 if errorlevel 1 (
-  echo [X] 错误：需要 Node.js ^(^>= 18^)
+  echo [X] Error: Node.js ^(^>= 18^) is required
   exit /b 1
 )
 echo [OK] Node.js:
 node -v
 
 echo.
-echo ==^> 步骤 1：构建 Host / Client bundle（内嵌核心脚本）
+echo ==^> Step 1: build Host / Client bundles (core scripts embedded)
 call node build.js
 if errorlevel 1 exit /b 1
 
 echo.
-echo ==^> 步骤 2：构造 cordis_define 入参
+echo ==^> Step 2: build cordis_define arguments
 call node build-cordis-args.js
 if errorlevel 1 exit /b 1
 
 echo.
-echo ==^> 完成！
+echo ==^> Done!
 echo.
-echo 接下来在 DeepSeek Harness 中：
-echo   1. 把 dist\cordis-args.json 的内容作为 cordis_define 工具的入参
-echo   2. 用返回的 pluginId 和 packageId 调用 cordis_run
-echo   3. 首次运行会触发审批，确认后激活
+echo Next, inside DeepSeek Harness:
+echo   1. feed dist\cordis-args.json as the cordis_define tool input
+echo   2. call cordis_run with the returned pluginId and packageId
+echo   3. first run triggers approval - confirm to activate
 echo.
-echo 不进 DSH 也能用（开机一键）：双击 FoxAI一键检查更新.bat
-echo （macOS 用 FoxAI一键检查更新.command / Linux 用 foxai-update-linux.sh）
+echo Without DSH (one-click at boot): double-click the one-click
+echo update .bat that sits next to this script in the same folder
+echo (macOS: .command entry / Linux: foxai-update-linux.sh)

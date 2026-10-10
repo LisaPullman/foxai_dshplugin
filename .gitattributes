@@ -1,0 +1,4 @@
+# cmd.exe 无法可靠解析 LF 行尾的批处理脚本（goto/标签/括号块会错位），
+# .bat/.cmd 必须始终以 CRLF 检出；仓库内统一存 LF（text 规范化）
+*.bat text eol=crlf
+*.cmd text eol=crlf
